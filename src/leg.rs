@@ -1,3 +1,4 @@
+use defmt::Format;
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::mcpwm::PwmPeripheral;
 
@@ -11,6 +12,7 @@ const STARTUP_EVENTS: u16 = 8;
 const HOMING_START_TIMEOUT: Duration = Duration::from_millis(800);
 const HOMING_STALL_TIMEOUT: Duration = Duration::from_millis(600);
 const HOMING_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const HOMING_BACKOFF_STEPS: u16 = 20;
 
 pub struct Unhomed;
 
@@ -22,6 +24,11 @@ enum MotionState {
 
 pub struct Ready {
     motion: MotionState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+pub enum LegError {
+    HomingStartTimeout,
 }
 
 pub struct Leg<'a, State, const OP: u8, PWM: PwmPeripheral> {
@@ -58,6 +65,39 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
     fn drive_home_down(&mut self) {
         self.motor.drive_right(HOMING_DUTY);
     }
+
+    async fn move_up_steps(&mut self, expected_direction: QuadratureDirection, steps: u16) {
+        if steps == 0 {
+            return;
+        }
+
+        if expected_direction == QuadratureDirection::Invalid {
+            return;
+        }
+
+        self.drive_up_boost();
+
+        let startup_steps = steps.min(STARTUP_EVENTS);
+        let mut steps_taken = 0;
+
+        while steps_taken < startup_steps {
+            self.quadrature_watcher
+                .wait_for_direction(expected_direction)
+                .await;
+            steps_taken += 1;
+        }
+
+        self.drive_up_run();
+
+        while steps_taken < steps {
+            self.quadrature_watcher
+                .wait_for_direction(expected_direction)
+                .await;
+            steps_taken += 1;
+        }
+
+        self.coast();
+    }
 }
 
 impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
@@ -69,7 +109,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
         }
     }
 
-    pub async fn home_down(mut self) -> Result<Leg<'a, Ready, OP, PWM>, Self> {
+    pub async fn home_down(mut self) -> Result<Leg<'a, Ready, OP, PWM>, (Self, LegError)> {
         let start_position = self.position();
         let start_deadline = Instant::now() + HOMING_START_TIMEOUT;
 
@@ -88,7 +128,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
 
             if Instant::now() >= start_deadline {
                 self.coast();
-                return Err(self);
+                return Err((self, LegError::HomingStartTimeout));
             }
 
             Timer::after(HOMING_POLL_INTERVAL).await;
@@ -120,6 +160,14 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
         }
 
         self.coast();
+        let backoff_direction = match homing_direction {
+            QuadratureDirection::Positive => QuadratureDirection::Negative,
+            QuadratureDirection::Negative => QuadratureDirection::Positive,
+            QuadratureDirection::Invalid => QuadratureDirection::Invalid,
+        };
+
+        self.move_up_steps(backoff_direction, HOMING_BACKOFF_STEPS)
+            .await;
         self.quadrature_watcher.reset_position();
 
         Ok(Leg {

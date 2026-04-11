@@ -144,8 +144,8 @@ async fn main(spawner: Spawner) -> ! {
             info!("homing complete, position reset to zero");
             leg
         }
-        Err(_leg) => {
-            warn!("homing failed, no downward encoder progress detected");
+        Err((_leg, error)) => {
+            warn!("homing failed: {:?}", error);
             loop {
                 Timer::after(Duration::from_secs(1)).await;
             }
