@@ -136,8 +136,21 @@ impl QuadratureWatcher {
         self.state.snapshot()
     }
 
+    pub fn reset_position(&self) {
+        self.state.position.store(0, Ordering::Release);
+    }
+
     pub async fn wait_for_change(&mut self) -> QuadratureEvent {
         self.receiver.changed().await
+    }
+
+    pub async fn wait_for_direction(&mut self, direction: QuadratureDirection) {
+        loop {
+            let event = self.wait_for_change().await;
+            if event.direction == direction {
+                return;
+            }
+        }
     }
 }
 

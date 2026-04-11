@@ -7,7 +7,7 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use defmt::info;
+use defmt::{info, warn};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::{
@@ -30,7 +30,6 @@ const HALL1_GPIO: u8 = 5;
 const HALL2_GPIO: u8 = 6;
 const PWM_PERIOD_TICKS: u16 = 99;
 const PWM_FREQUENCY_KHZ: u32 = 20;
-const DIRECTION_CHANGE_DELAY_MS: u64 = 500;
 
 #[embassy_executor::task]
 async fn watch_quadrature(mut watcher: QuadratureWatcher) {
@@ -139,10 +138,17 @@ async fn main(spawner: Spawner) -> ! {
         PWM_FREQUENCY_KHZ, PWM_PERIOD_TICKS,
     );
 
+    info!("homing leg down until stall");
+    if leg.home_down().await {
+        info!("homing complete, position reset to zero");
+    } else {
+        warn!("homing failed, no downward encoder progress detected");
+        loop {
+            Timer::after(Duration::from_secs(1)).await;
+        }
+    }
+
     loop {
-        leg.move_up_step(100).await;
-        Timer::after(Duration::from_millis(DIRECTION_CHANGE_DELAY_MS)).await;
-        leg.move_down_step(100).await;
-        Timer::after(Duration::from_millis(DIRECTION_CHANGE_DELAY_MS)).await;
+        Timer::after(Duration::from_secs(1)).await;
     }
 }
