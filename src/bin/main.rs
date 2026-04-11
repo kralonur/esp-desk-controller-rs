@@ -118,7 +118,7 @@ async fn main(spawner: Spawner) -> ! {
 
     motor.enable();
 
-    let mut leg = esp_pwm_motor::leg::Leg::new(motor, leg_watcher);
+    let leg = esp_pwm_motor::leg::Leg::new(motor, leg_watcher);
 
     info!(
         "quadrature monitor initialized on GPIO{=u8} and GPIO{=u8}",
@@ -139,14 +139,18 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     info!("homing leg down until stall");
-    if leg.home_down().await {
-        info!("homing complete, position reset to zero");
-    } else {
-        warn!("homing failed, no downward encoder progress detected");
-        loop {
-            Timer::after(Duration::from_secs(1)).await;
+    let _leg = match leg.home_down().await {
+        Ok(leg) => {
+            info!("homing complete, position reset to zero");
+            leg
         }
-    }
+        Err(_leg) => {
+            warn!("homing failed, no downward encoder progress detected");
+            loop {
+                Timer::after(Duration::from_secs(1)).await;
+            }
+        }
+    };
 
     loop {
         Timer::after(Duration::from_secs(1)).await;
