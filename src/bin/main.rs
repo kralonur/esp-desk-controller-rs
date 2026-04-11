@@ -12,11 +12,11 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::{
     clock::CpuClock,
-    gpio::{Level, Output, OutputConfig},
     mcpwm::{McPwm, PeripheralClockConfig},
     time::Rate,
     timer::timg::TimerGroup,
 };
+use esp_pwm_motor::motor::Motor;
 use {esp_backtrace as _, esp_println as _};
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
@@ -56,16 +56,13 @@ async fn main(spawner: Spawner) -> ! {
     let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40)).unwrap();
     let mut mcpwm = McPwm::new(peripherals.MCPWM0, clock_cfg);
     mcpwm.operator0.set_timer(&mcpwm.timer0);
-    mcpwm.operator1.set_timer(&mcpwm.timer0);
 
-    let mut left_pwm = mcpwm.operator0.with_pin_a(
+    let mut motor = Motor::new(
+        left_enable_pin,
+        right_enable_pin,
         left_pwm_pin,
-        esp_hal::mcpwm::operator::PwmPinConfig::UP_ACTIVE_HIGH,
-    );
-
-    let mut right_pwm = mcpwm.operator1.with_pin_a(
         right_pwm_pin,
-        esp_hal::mcpwm::operator::PwmPinConfig::UP_ACTIVE_HIGH,
+        mcpwm.operator0,
     );
 
     let timer_clock_cfg = clock_cfg
@@ -77,8 +74,8 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap();
     mcpwm.timer0.start(timer_clock_cfg);
 
-    let mut left_enable = Output::new(left_enable_pin, Level::High, OutputConfig::default());
-    let mut right_enable = Output::new(right_enable_pin, Level::High, OutputConfig::default());
+    motor.set_left_enable(true);
+    motor.set_right_enable(true);
 
     info!(
         "motor ramp active, left/right pwm alternate, duty {}-{}%, freq={}kHz, period={}",
@@ -88,39 +85,39 @@ async fn main(spawner: Spawner) -> ! {
     let _ = spawner;
 
     loop {
-        right_pwm.set_timestamp(0);
+        motor.set_right_duty(0);
         for duty in PWM_MIN_DUTY_PERCENT..=PWM_MAX_DUTY_PERCENT {
-            left_pwm.set_timestamp(duty_pct_to_timestamp(duty));
+            motor.set_left_duty(duty_pct_to_timestamp(duty));
             Timer::after(Duration::from_millis(RAMP_STEP_MS)).await;
         }
 
         for duty in (PWM_MIN_DUTY_PERCENT..PWM_MAX_DUTY_PERCENT).rev() {
-            left_pwm.set_timestamp(duty_pct_to_timestamp(duty));
+            motor.set_left_duty(duty_pct_to_timestamp(duty));
             Timer::after(Duration::from_millis(RAMP_STEP_MS)).await;
         }
 
-        left_pwm.set_timestamp(0);
-        left_enable.set_low();
-        right_enable.set_low();
+        motor.set_left_duty(0);
+        motor.set_left_enable(false);
+        motor.set_right_enable(false);
         Timer::after(Duration::from_millis(DIRECTION_CHANGE_DELAY_MS)).await;
-        left_enable.set_high();
-        right_enable.set_high();
+        motor.set_left_enable(true);
+        motor.set_right_enable(true);
 
         for duty in PWM_MIN_DUTY_PERCENT..=PWM_MAX_DUTY_PERCENT {
-            right_pwm.set_timestamp(duty_pct_to_timestamp(duty));
+            motor.set_right_duty(duty_pct_to_timestamp(duty));
             Timer::after(Duration::from_millis(RAMP_STEP_MS)).await;
         }
 
         for duty in (PWM_MIN_DUTY_PERCENT..PWM_MAX_DUTY_PERCENT).rev() {
-            right_pwm.set_timestamp(duty_pct_to_timestamp(duty));
+            motor.set_right_duty(duty_pct_to_timestamp(duty));
             Timer::after(Duration::from_millis(RAMP_STEP_MS)).await;
         }
 
-        right_pwm.set_timestamp(0);
-        left_enable.set_low();
-        right_enable.set_low();
+        motor.set_right_duty(0);
+        motor.set_left_enable(false);
+        motor.set_right_enable(false);
         Timer::after(Duration::from_millis(DIRECTION_CHANGE_DELAY_MS)).await;
-        left_enable.set_high();
-        right_enable.set_high();
+        motor.set_left_enable(true);
+        motor.set_right_enable(true);
     }
 }
