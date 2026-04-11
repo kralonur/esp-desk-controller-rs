@@ -42,21 +42,28 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Motor<'a, OP, PWM> {
         }
     }
 
-    pub fn set_left_duty(&mut self, duty: u16) {
+    pub fn enable(&mut self) {
+        self.left_enable.set_high();
+        self.right_enable.set_high();
+    }
+
+    pub fn disable(&mut self) {
+        self.left_enable.set_low();
+        self.right_enable.set_low();
+    }
+
+    pub fn coast(&mut self) {
+        self.left_pwm.set_timestamp(0);
+        self.right_pwm.set_timestamp(0);
+    }
+
+    pub fn drive_left(&mut self, duty: u16) {
         self.left_pwm.set_timestamp(duty);
+        self.right_pwm.set_timestamp(0);
     }
 
-    pub fn set_right_duty(&mut self, duty: u16) {
+    pub fn drive_right(&mut self, duty: u16) {
+        self.left_pwm.set_timestamp(0);
         self.right_pwm.set_timestamp(duty);
-    }
-
-    pub fn set_left_enable(&mut self, enable: bool) {
-        self.left_enable
-            .set_level(if enable { Level::High } else { Level::Low });
-    }
-
-    pub fn set_right_enable(&mut self, enable: bool) {
-        self.right_enable
-            .set_level(if enable { Level::High } else { Level::Low });
     }
 }

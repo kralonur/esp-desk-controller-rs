@@ -74,8 +74,7 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap();
     mcpwm.timer0.start(timer_clock_cfg);
 
-    motor.set_left_enable(true);
-    motor.set_right_enable(true);
+    motor.enable();
 
     info!(
         "motor ramp active, left/right pwm alternate, duty {}-{}%, freq={}kHz, period={}",
@@ -85,39 +84,34 @@ async fn main(spawner: Spawner) -> ! {
     let _ = spawner;
 
     loop {
-        motor.set_right_duty(0);
         for duty in PWM_MIN_DUTY_PERCENT..=PWM_MAX_DUTY_PERCENT {
-            motor.set_left_duty(duty_pct_to_timestamp(duty));
+            motor.drive_left(duty_pct_to_timestamp(duty));
             Timer::after(Duration::from_millis(RAMP_STEP_MS)).await;
         }
 
         for duty in (PWM_MIN_DUTY_PERCENT..PWM_MAX_DUTY_PERCENT).rev() {
-            motor.set_left_duty(duty_pct_to_timestamp(duty));
+            motor.drive_left(duty_pct_to_timestamp(duty));
             Timer::after(Duration::from_millis(RAMP_STEP_MS)).await;
         }
 
-        motor.set_left_duty(0);
-        motor.set_left_enable(false);
-        motor.set_right_enable(false);
+        motor.coast();
+        motor.disable();
         Timer::after(Duration::from_millis(DIRECTION_CHANGE_DELAY_MS)).await;
-        motor.set_left_enable(true);
-        motor.set_right_enable(true);
+        motor.enable();
 
         for duty in PWM_MIN_DUTY_PERCENT..=PWM_MAX_DUTY_PERCENT {
-            motor.set_right_duty(duty_pct_to_timestamp(duty));
+            motor.drive_right(duty_pct_to_timestamp(duty));
             Timer::after(Duration::from_millis(RAMP_STEP_MS)).await;
         }
 
         for duty in (PWM_MIN_DUTY_PERCENT..PWM_MAX_DUTY_PERCENT).rev() {
-            motor.set_right_duty(duty_pct_to_timestamp(duty));
+            motor.drive_right(duty_pct_to_timestamp(duty));
             Timer::after(Duration::from_millis(RAMP_STEP_MS)).await;
         }
 
-        motor.set_right_duty(0);
-        motor.set_left_enable(false);
-        motor.set_right_enable(false);
+        motor.coast();
+        motor.disable();
         Timer::after(Duration::from_millis(DIRECTION_CHANGE_DELAY_MS)).await;
-        motor.set_left_enable(true);
-        motor.set_right_enable(true);
+        motor.enable();
     }
 }
