@@ -30,17 +30,10 @@ const HALL1_GPIO: u8 = 5;
 const HALL2_GPIO: u8 = 6;
 const PWM_PERIOD_TICKS: u16 = 99;
 const PWM_FREQUENCY_KHZ: u32 = 20;
-const PWM_MIN_DUTY_PERCENT: u16 = 10;
-const PWM_MAX_DUTY_PERCENT: u16 = 100;
-const RAMP_STEP_MS: u64 = 50;
 const DIRECTION_CHANGE_DELAY_MS: u64 = 500;
 
-fn duty_pct_to_timestamp(duty_pct: u16) -> u16 {
-    (PWM_PERIOD_TICKS * duty_pct) / 100
-}
-
 #[embassy_executor::task]
-async fn watch_quadrature(watcher: QuadratureWatcher) {
+async fn watch_quadrature(mut watcher: QuadratureWatcher) {
     loop {
         let event = watcher.wait_for_change().await;
         let snapshot = event.snapshot;
@@ -118,11 +111,15 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap();
     mcpwm.timer0.start(timer_clock_cfg);
 
-    let (quadrature, watcher, snapshot) = Quadrature::new(peripherals.GPIO5, peripherals.GPIO6);
+    let (quadrature, snapshot) = Quadrature::new(peripherals.GPIO5, peripherals.GPIO6);
+    let log_watcher = quadrature.watcher();
+    let leg_watcher = quadrature.watcher();
     quadrature.spawn(&spawner);
-    spawner.must_spawn(watch_quadrature(watcher));
+    spawner.must_spawn(watch_quadrature(log_watcher));
 
     motor.enable();
+
+    let mut leg = esp_pwm_motor::leg::Leg::new(motor, leg_watcher);
 
     info!(
         "quadrature monitor initialized on GPIO{=u8} and GPIO{=u8}",
@@ -138,39 +135,14 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     info!(
-        "motor ramp active, left/right pwm alternate, duty {}-{}%, freq={}kHz, period={}",
-        PWM_MIN_DUTY_PERCENT, PWM_MAX_DUTY_PERCENT, PWM_FREQUENCY_KHZ, PWM_PERIOD_TICKS,
+        "motor control active, freq={}kHz, period={}",
+        PWM_FREQUENCY_KHZ, PWM_PERIOD_TICKS,
     );
 
     loop {
-        for duty in PWM_MIN_DUTY_PERCENT..=PWM_MAX_DUTY_PERCENT {
-            motor.drive_left(duty_pct_to_timestamp(duty));
-            Timer::after(Duration::from_millis(RAMP_STEP_MS)).await;
-        }
-
-        for duty in (PWM_MIN_DUTY_PERCENT..PWM_MAX_DUTY_PERCENT).rev() {
-            motor.drive_left(duty_pct_to_timestamp(duty));
-            Timer::after(Duration::from_millis(RAMP_STEP_MS)).await;
-        }
-
-        motor.coast();
-        motor.disable();
+        leg.move_up_step(100).await;
         Timer::after(Duration::from_millis(DIRECTION_CHANGE_DELAY_MS)).await;
-        motor.enable();
-
-        for duty in PWM_MIN_DUTY_PERCENT..=PWM_MAX_DUTY_PERCENT {
-            motor.drive_right(duty_pct_to_timestamp(duty));
-            Timer::after(Duration::from_millis(RAMP_STEP_MS)).await;
-        }
-
-        for duty in (PWM_MIN_DUTY_PERCENT..PWM_MAX_DUTY_PERCENT).rev() {
-            motor.drive_right(duty_pct_to_timestamp(duty));
-            Timer::after(Duration::from_millis(RAMP_STEP_MS)).await;
-        }
-
-        motor.coast();
-        motor.disable();
+        leg.move_down_step(100).await;
         Timer::after(Duration::from_millis(DIRECTION_CHANGE_DELAY_MS)).await;
-        motor.enable();
     }
 }
