@@ -1,5 +1,5 @@
 use defmt::Format;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Instant, Timer, with_deadline};
 use esp_hal::mcpwm::PwmPeripheral;
 
 use crate::motor::Motor;
@@ -13,6 +13,8 @@ const HOMING_START_TIMEOUT: Duration = Duration::from_millis(800);
 const HOMING_STALL_TIMEOUT: Duration = Duration::from_millis(600);
 const HOMING_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const HOMING_BACKOFF_STEPS: u16 = 20;
+const DEFAULT_MAX_POSITION: i32 = 2_000;
+const MOVE_STALL_TIMEOUT: Duration = Duration::from_millis(600);
 
 pub struct Unhomed;
 
@@ -23,12 +25,17 @@ enum MotionState {
 }
 
 pub struct Ready {
+    min_position: i32,
+    max_position: i32,
+    up_direction: QuadratureDirection,
+    down_direction: QuadratureDirection,
     motion: MotionState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub enum LegError {
     HomingStartTimeout,
+    MoveTimeout,
 }
 
 pub struct Leg<'a, State, const OP: u8, PWM: PwmPeripheral> {
@@ -100,6 +107,14 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
     }
 }
 
+fn opposite_direction(direction: QuadratureDirection) -> QuadratureDirection {
+    match direction {
+        QuadratureDirection::Positive => QuadratureDirection::Negative,
+        QuadratureDirection::Negative => QuadratureDirection::Positive,
+        QuadratureDirection::Invalid => QuadratureDirection::Invalid,
+    }
+}
+
 impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
     pub fn new(motor: Motor<'a, OP, PWM>, quadrature_watcher: QuadratureWatcher) -> Self {
         Self {
@@ -160,11 +175,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
         }
 
         self.coast();
-        let backoff_direction = match homing_direction {
-            QuadratureDirection::Positive => QuadratureDirection::Negative,
-            QuadratureDirection::Negative => QuadratureDirection::Positive,
-            QuadratureDirection::Invalid => QuadratureDirection::Invalid,
-        };
+        let backoff_direction = opposite_direction(homing_direction);
 
         self.move_up_steps(backoff_direction, HOMING_BACKOFF_STEPS)
             .await;
@@ -174,6 +185,10 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
             motor: self.motor,
             quadrature_watcher: self.quadrature_watcher,
             state: Ready {
+                min_position: 0,
+                max_position: DEFAULT_MAX_POSITION,
+                up_direction: opposite_direction(homing_direction),
+                down_direction: homing_direction,
                 motion: MotionState::Idle,
             },
         })
@@ -181,12 +196,38 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
 }
 
 impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
+    pub fn min_position(&self) -> i32 {
+        self.state.min_position
+    }
+
+    pub fn max_position(&self) -> i32 {
+        self.state.max_position
+    }
+
+    pub fn set_max_position(&mut self, max_position: i32) {
+        self.state.max_position = max_position.max(self.state.min_position);
+    }
+
+    pub fn clamp_target(&self, target_position: i32) -> i32 {
+        target_position.clamp(self.state.min_position, self.state.max_position)
+    }
+
     pub fn move_up(&mut self) {
+        if self.position() >= self.state.max_position {
+            self.stop();
+            return;
+        }
+
         self.drive_up_run();
         self.state.motion = MotionState::MovingUp;
     }
 
     pub fn move_down(&mut self) {
+        if self.position() <= self.state.min_position {
+            self.stop();
+            return;
+        }
+
         self.drive_down_run();
         self.state.motion = MotionState::MovingDown;
     }
@@ -197,6 +238,14 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
     }
 
     pub async fn move_up_step(&mut self, steps: u16) {
+        let allowed_steps = (self.state.max_position - self.position()).max(0) as u16;
+        let steps = steps.min(allowed_steps);
+
+        if steps == 0 {
+            self.stop();
+            return;
+        }
+
         let mut steps_taken = 0;
         let startup_steps = steps.min(STARTUP_EVENTS);
 
@@ -205,7 +254,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
 
         while steps_taken < startup_steps {
             self.quadrature_watcher
-                .wait_for_direction(QuadratureDirection::Positive)
+                .wait_for_direction(self.state.up_direction)
                 .await;
             steps_taken += 1;
         }
@@ -214,7 +263,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
 
         while steps_taken < steps {
             self.quadrature_watcher
-                .wait_for_direction(QuadratureDirection::Positive)
+                .wait_for_direction(self.state.up_direction)
                 .await;
             steps_taken += 1;
         }
@@ -223,6 +272,14 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
     }
 
     pub async fn move_down_step(&mut self, steps: u16) {
+        let allowed_steps = (self.position() - self.state.min_position).max(0) as u16;
+        let steps = steps.min(allowed_steps);
+
+        if steps == 0 {
+            self.stop();
+            return;
+        }
+
         let mut steps_taken = 0;
         let startup_steps = steps.min(STARTUP_EVENTS);
 
@@ -231,7 +288,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
 
         while steps_taken < startup_steps {
             self.quadrature_watcher
-                .wait_for_direction(QuadratureDirection::Negative)
+                .wait_for_direction(self.state.down_direction)
                 .await;
             steps_taken += 1;
         }
@@ -240,11 +297,72 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
 
         while steps_taken < steps {
             self.quadrature_watcher
-                .wait_for_direction(QuadratureDirection::Negative)
+                .wait_for_direction(self.state.down_direction)
                 .await;
             steps_taken += 1;
         }
 
         self.stop();
+    }
+
+    pub async fn move_to(&mut self, target_position: i32) -> Result<(), LegError> {
+        let target_position = self.clamp_target(target_position);
+        let current_position = self.position();
+
+        if target_position > current_position {
+            self.drive_up_boost();
+            self.state.motion = MotionState::MovingUp;
+
+            loop {
+                match with_deadline(
+                    Instant::now() + MOVE_STALL_TIMEOUT,
+                    self.quadrature_watcher.wait_for_change(),
+                )
+                .await
+                {
+                    Ok(event) => {
+                        if event.snapshot.position >= target_position {
+                            self.stop();
+                            break;
+                        }
+
+                        self.move_up();
+                    }
+                    Err(_) => {
+                        self.stop();
+                        return Err(LegError::MoveTimeout);
+                    }
+                }
+            }
+        } else if target_position < current_position {
+            self.drive_down_boost();
+            self.state.motion = MotionState::MovingDown;
+
+            loop {
+                match with_deadline(
+                    Instant::now() + MOVE_STALL_TIMEOUT,
+                    self.quadrature_watcher.wait_for_change(),
+                )
+                .await
+                {
+                    Ok(event) => {
+                        if event.snapshot.position <= target_position {
+                            self.stop();
+                            break;
+                        }
+
+                        self.move_down();
+                    }
+                    Err(_) => {
+                        self.stop();
+                        return Err(LegError::MoveTimeout);
+                    }
+                }
+            }
+        } else {
+            self.stop();
+        }
+
+        Ok(())
     }
 }

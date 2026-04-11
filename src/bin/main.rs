@@ -139,7 +139,7 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     info!("homing leg down until stall");
-    let _leg = match leg.home_down().await {
+    let mut leg = match leg.home_down().await {
         Ok(leg) => {
             info!("homing complete, position reset to zero");
             leg
@@ -151,6 +151,20 @@ async fn main(spawner: Spawner) -> ! {
             }
         }
     };
+
+    info!("moving to target 500");
+    match leg.move_to(500).await {
+        Ok(()) => info!("target 500 reached"),
+        Err(error) => warn!("move to 500 failed: {:?}", error),
+    }
+
+    Timer::after(Duration::from_secs(1)).await;
+
+    info!("moving to target -500 (will clamp to min position 0)");
+    match leg.move_to(-500).await {
+        Ok(()) => info!("target -500 request completed"),
+        Err(error) => warn!("move to -500 failed: {:?}", error),
+    }
 
     loop {
         Timer::after(Duration::from_secs(1)).await;
