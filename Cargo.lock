@@ -674,6 +674,7 @@ dependencies = [
  "critical-section",
  "defmt 1.0.1",
  "embassy-executor",
+ "embassy-sync 0.8.0",
  "embassy-time",
  "esp-backtrace",
  "esp-bootloader-esp-idf",

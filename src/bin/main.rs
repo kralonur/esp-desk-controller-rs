@@ -16,13 +16,18 @@ use esp_hal::{
     time::Rate,
     timer::timg::TimerGroup,
 };
-use esp_pwm_motor::motor::Motor;
+use esp_pwm_motor::{
+    motor::Motor,
+    quadrature::{Quadrature, QuadratureDirection, QuadratureWatcher},
+};
 use {esp_backtrace as _, esp_println as _};
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
+const HALL1_GPIO: u8 = 5;
+const HALL2_GPIO: u8 = 6;
 const PWM_PERIOD_TICKS: u16 = 99;
 const PWM_FREQUENCY_KHZ: u32 = 20;
 const PWM_MIN_DUTY_PERCENT: u16 = 10;
@@ -32,6 +37,45 @@ const DIRECTION_CHANGE_DELAY_MS: u64 = 500;
 
 fn duty_pct_to_timestamp(duty_pct: u16) -> u16 {
     (PWM_PERIOD_TICKS * duty_pct) / 100
+}
+
+#[embassy_executor::task]
+async fn watch_quadrature(watcher: QuadratureWatcher) {
+    loop {
+        let event = watcher.wait_for_change().await;
+        let snapshot = event.snapshot;
+
+        match event.direction {
+            QuadratureDirection::Positive => {
+                info!(
+                    "quad pos={=i32} dir={=str} a={=bool} b={=bool} state={=u8} via_hall{=u8}",
+                    snapshot.position,
+                    "positive",
+                    snapshot.hall1_high(),
+                    snapshot.hall2_high(),
+                    snapshot.state,
+                    event.channel,
+                );
+            }
+            QuadratureDirection::Negative => {
+                info!(
+                    "quad pos={=i32} dir={=str} a={=bool} b={=bool} state={=u8} via_hall{=u8}",
+                    snapshot.position,
+                    "negative",
+                    snapshot.hall1_high(),
+                    snapshot.hall2_high(),
+                    snapshot.state,
+                    event.channel,
+                );
+            }
+            QuadratureDirection::Invalid => {
+                info!(
+                    "quad invalid state={=u8} hall{=u8}={:?} errors={=u32}",
+                    snapshot.state, event.channel, event.level, snapshot.invalid_transitions,
+                );
+            }
+        }
+    }
 }
 
 #[allow(
@@ -74,14 +118,29 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap();
     mcpwm.timer0.start(timer_clock_cfg);
 
+    let (quadrature, watcher, snapshot) = Quadrature::new(peripherals.GPIO5, peripherals.GPIO6);
+    quadrature.spawn(&spawner);
+    spawner.must_spawn(watch_quadrature(watcher));
+
     motor.enable();
+
+    info!(
+        "quadrature monitor initialized on GPIO{=u8} and GPIO{=u8}",
+        HALL1_GPIO, HALL2_GPIO
+    );
+    info!(
+        "quadrature initial a={=bool} b={=bool} state={=u8} pos={=i32} errors={=u32}",
+        snapshot.hall1_high(),
+        snapshot.hall2_high(),
+        snapshot.state,
+        snapshot.position,
+        snapshot.invalid_transitions,
+    );
 
     info!(
         "motor ramp active, left/right pwm alternate, duty {}-{}%, freq={}kHz, period={}",
         PWM_MIN_DUTY_PERCENT, PWM_MAX_DUTY_PERCENT, PWM_FREQUENCY_KHZ, PWM_PERIOD_TICKS,
     );
-
-    let _ = spawner;
 
     loop {
         for duty in PWM_MIN_DUTY_PERCENT..=PWM_MAX_DUTY_PERCENT {
