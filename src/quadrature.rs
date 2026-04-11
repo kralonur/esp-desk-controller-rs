@@ -1,7 +1,10 @@
 use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
 
 use embassy_executor::Spawner;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    watch::{Receiver, Watch},
+};
 use esp_hal::gpio::{Input, InputConfig, InputPin, Level, Pull};
 use static_cell::StaticCell;
 
@@ -36,7 +39,7 @@ struct QuadratureState {
     state: AtomicU8,
     position: AtomicI32,
     invalid_transitions: AtomicU32,
-    events: Signal<CriticalSectionRawMutex, QuadratureEvent>,
+    events: Watch<CriticalSectionRawMutex, QuadratureEvent, 4>,
 }
 
 pub struct Quadrature<'a> {
@@ -45,8 +48,8 @@ pub struct Quadrature<'a> {
     state: &'static QuadratureState,
 }
 
-#[derive(Clone, Copy)]
 pub struct QuadratureWatcher {
+    receiver: Receiver<'static, CriticalSectionRawMutex, QuadratureEvent, 4>,
     state: &'static QuadratureState,
 }
 
@@ -66,7 +69,7 @@ impl QuadratureState {
             state: AtomicU8::new(0),
             position: AtomicI32::new(0),
             invalid_transitions: AtomicU32::new(0),
-            events: Signal::new(),
+            events: Watch::new(),
         }
     }
 
@@ -89,7 +92,7 @@ impl Quadrature<'static> {
     pub fn new(
         hall1_pin: impl InputPin + 'static,
         hall2_pin: impl InputPin + 'static,
-    ) -> (Self, QuadratureWatcher, QuadratureSnapshot) {
+    ) -> (Self, QuadratureSnapshot) {
         let hall1 = Input::new(hall1_pin, hall_input_config());
         let hall2 = Input::new(hall2_pin, hall_input_config());
         let initial_state = state_from_levels(hall1.level(), hall2.level());
@@ -98,7 +101,6 @@ impl Quadrature<'static> {
         state.initialize(initial_state);
 
         let snapshot = state.snapshot();
-        let watcher = QuadratureWatcher { state };
 
         (
             Self {
@@ -106,7 +108,6 @@ impl Quadrature<'static> {
                 hall2,
                 state,
             },
-            watcher,
             snapshot,
         )
     }
@@ -115,15 +116,28 @@ impl Quadrature<'static> {
         spawner.must_spawn(monitor_hall(1, HALL1_BIT, self.hall1, self.state));
         spawner.must_spawn(monitor_hall(2, HALL2_BIT, self.hall2, self.state));
     }
+
+    pub fn watcher(&self) -> QuadratureWatcher {
+        let receiver = self
+            .state
+            .events
+            .receiver()
+            .expect("quadrature watch receiver limit reached");
+
+        QuadratureWatcher {
+            receiver,
+            state: self.state,
+        }
+    }
 }
 
 impl QuadratureWatcher {
-    pub fn snapshot(self) -> QuadratureSnapshot {
+    pub fn snapshot(&self) -> QuadratureSnapshot {
         self.state.snapshot()
     }
 
-    pub async fn wait_for_change(self) -> QuadratureEvent {
-        self.state.events.wait().await
+    pub async fn wait_for_change(&mut self) -> QuadratureEvent {
+        self.receiver.changed().await
     }
 }
 
@@ -194,7 +208,7 @@ fn update_quadrature_state(state: &'static QuadratureState, channel: u8, bit: u8
                 _ => QuadratureDirection::Invalid,
             };
 
-            state.events.signal(QuadratureEvent {
+            state.events.sender().send(QuadratureEvent {
                 channel,
                 level,
                 direction,
