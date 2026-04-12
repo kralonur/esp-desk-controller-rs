@@ -7,6 +7,7 @@ use crate::quadrature::{QuadratureDirection, QuadratureWatcher};
 
 const STARTUP_DUTY: u16 = 99;
 const RUN_DUTY: u16 = 30;
+const SLOW_DUTY: u16 = 15;
 const HOMING_DUTY: u16 = 20;
 const STARTUP_EVENTS: u16 = 8;
 const HOMING_START_TIMEOUT: Duration = Duration::from_millis(800);
@@ -15,6 +16,8 @@ const HOMING_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const HOMING_BACKOFF_STEPS: u16 = 20;
 const DEFAULT_MAX_POSITION: i32 = 2_000;
 const MOVE_STALL_TIMEOUT: Duration = Duration::from_millis(600);
+const TARGET_SLOW_ZONE: i32 = 10;
+const TARGET_TOLERANCE: i32 = 5;
 
 pub struct Unhomed;
 
@@ -67,6 +70,14 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
 
     fn drive_down_run(&mut self) {
         self.motor.drive_right(RUN_DUTY);
+    }
+
+    fn drive_up_slow(&mut self) {
+        self.motor.drive_left(SLOW_DUTY);
+    }
+
+    fn drive_down_slow(&mut self) {
+        self.motor.drive_right(SLOW_DUTY);
     }
 
     fn drive_home_down(&mut self) {
@@ -309,6 +320,11 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         let target_position = self.clamp_target(target_position);
         let current_position = self.position();
 
+        if (target_position - current_position).abs() <= TARGET_TOLERANCE {
+            self.stop();
+            return Ok(());
+        }
+
         if target_position > current_position {
             self.drive_up_boost();
             self.state.motion = MotionState::MovingUp;
@@ -321,12 +337,19 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                 .await
                 {
                     Ok(event) => {
-                        if event.snapshot.position >= target_position {
+                        let error = target_position - event.snapshot.position;
+
+                        if error <= TARGET_TOLERANCE {
                             self.stop();
                             break;
                         }
 
-                        self.move_up();
+                        if error <= TARGET_SLOW_ZONE {
+                            self.drive_up_slow();
+                            self.state.motion = MotionState::MovingUp;
+                        } else {
+                            self.move_up();
+                        }
                     }
                     Err(_) => {
                         self.stop();
@@ -346,12 +369,19 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                 .await
                 {
                     Ok(event) => {
-                        if event.snapshot.position <= target_position {
+                        let error = event.snapshot.position - target_position;
+
+                        if error <= TARGET_TOLERANCE {
                             self.stop();
                             break;
                         }
 
-                        self.move_down();
+                        if error <= TARGET_SLOW_ZONE {
+                            self.drive_down_slow();
+                            self.state.motion = MotionState::MovingDown;
+                        } else {
+                            self.move_down();
+                        }
                     }
                     Err(_) => {
                         self.stop();
