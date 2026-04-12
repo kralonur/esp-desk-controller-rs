@@ -248,72 +248,90 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         self.state.motion = MotionState::Idle;
     }
 
-    pub async fn move_up_step(&mut self, steps: u16) {
-        let allowed_steps = (self.state.max_position - self.position()).max(0) as u16;
-        let steps = steps.min(allowed_steps);
+    async fn wait_for_progress(
+        &mut self,
+        direction: QuadratureDirection,
+        timeout: Duration,
+    ) -> Result<crate::quadrature::QuadratureEvent, LegError> {
+        let deadline = Instant::now() + timeout;
 
-        if steps == 0 {
-            self.stop();
-            return;
+        loop {
+            match with_deadline(deadline, self.quadrature_watcher.wait_for_change()).await {
+                Ok(event) if event.direction == direction => return Ok(event),
+                Ok(_) => {}
+                Err(_) => {
+                    self.stop();
+                    return Err(LegError::MoveTimeout);
+                }
+            }
         }
-
-        let mut steps_taken = 0;
-        let startup_steps = steps.min(STARTUP_EVENTS);
-
-        self.drive_up_boost();
-        self.state.motion = MotionState::MovingUp;
-
-        while steps_taken < startup_steps {
-            self.quadrature_watcher
-                .wait_for_direction(self.state.up_direction)
-                .await;
-            steps_taken += 1;
-        }
-
-        self.move_up();
-
-        while steps_taken < steps {
-            self.quadrature_watcher
-                .wait_for_direction(self.state.up_direction)
-                .await;
-            steps_taken += 1;
-        }
-
-        self.stop();
     }
 
-    pub async fn move_down_step(&mut self, steps: u16) {
-        let allowed_steps = (self.position() - self.state.min_position).max(0) as u16;
+    async fn move_steps(
+        &mut self,
+        direction: QuadratureDirection,
+        steps: u16,
+    ) -> Result<(), LegError> {
+        let allowed_steps = match direction {
+            QuadratureDirection::Positive => {
+                (self.state.max_position - self.position()).max(0) as u16
+            }
+            QuadratureDirection::Negative => {
+                (self.position() - self.state.min_position).max(0) as u16
+            }
+            QuadratureDirection::Invalid => 0,
+        };
         let steps = steps.min(allowed_steps);
 
         if steps == 0 {
             self.stop();
-            return;
+            return Ok(());
         }
 
         let mut steps_taken = 0;
         let startup_steps = steps.min(STARTUP_EVENTS);
 
-        self.drive_down_boost();
-        self.state.motion = MotionState::MovingDown;
+        match direction {
+            QuadratureDirection::Positive => {
+                self.drive_up_boost();
+                self.state.motion = MotionState::MovingUp;
+            }
+            QuadratureDirection::Negative => {
+                self.drive_down_boost();
+                self.state.motion = MotionState::MovingDown;
+            }
+            QuadratureDirection::Invalid => {
+                self.stop();
+                return Ok(());
+            }
+        }
 
         while steps_taken < startup_steps {
-            self.quadrature_watcher
-                .wait_for_direction(self.state.down_direction)
-                .await;
+            self.wait_for_progress(direction, MOVE_STALL_TIMEOUT).await?;
             steps_taken += 1;
         }
 
-        self.move_down();
+        match direction {
+            QuadratureDirection::Positive => self.move_up(),
+            QuadratureDirection::Negative => self.move_down(),
+            QuadratureDirection::Invalid => {}
+        }
 
         while steps_taken < steps {
-            self.quadrature_watcher
-                .wait_for_direction(self.state.down_direction)
-                .await;
+            self.wait_for_progress(direction, MOVE_STALL_TIMEOUT).await?;
             steps_taken += 1;
         }
 
         self.stop();
+        Ok(())
+    }
+
+    pub async fn move_up_step(&mut self, steps: u16) -> Result<(), LegError> {
+        self.move_steps(self.state.up_direction, steps).await
+    }
+
+    pub async fn move_down_step(&mut self, steps: u16) -> Result<(), LegError> {
+        self.move_steps(self.state.down_direction, steps).await
     }
 
     pub async fn move_to(&mut self, target_position: i32) -> Result<(), LegError> {
@@ -330,31 +348,21 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             self.state.motion = MotionState::MovingUp;
 
             loop {
-                match with_deadline(
-                    Instant::now() + MOVE_STALL_TIMEOUT,
-                    self.quadrature_watcher.wait_for_change(),
-                )
-                .await
-                {
-                    Ok(event) => {
-                        let error = target_position - event.snapshot.position;
+                let event = self
+                    .wait_for_progress(self.state.up_direction, MOVE_STALL_TIMEOUT)
+                    .await?;
+                let error = target_position - event.snapshot.position;
 
-                        if error <= TARGET_TOLERANCE {
-                            self.stop();
-                            break;
-                        }
+                if error <= TARGET_TOLERANCE {
+                    self.stop();
+                    break;
+                }
 
-                        if error <= TARGET_SLOW_ZONE {
-                            self.drive_up_slow();
-                            self.state.motion = MotionState::MovingUp;
-                        } else {
-                            self.move_up();
-                        }
-                    }
-                    Err(_) => {
-                        self.stop();
-                        return Err(LegError::MoveTimeout);
-                    }
+                if error <= TARGET_SLOW_ZONE {
+                    self.drive_up_slow();
+                    self.state.motion = MotionState::MovingUp;
+                } else {
+                    self.move_up();
                 }
             }
         } else if target_position < current_position {
@@ -362,31 +370,21 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             self.state.motion = MotionState::MovingDown;
 
             loop {
-                match with_deadline(
-                    Instant::now() + MOVE_STALL_TIMEOUT,
-                    self.quadrature_watcher.wait_for_change(),
-                )
-                .await
-                {
-                    Ok(event) => {
-                        let error = event.snapshot.position - target_position;
+                let event = self
+                    .wait_for_progress(self.state.down_direction, MOVE_STALL_TIMEOUT)
+                    .await?;
+                let error = event.snapshot.position - target_position;
 
-                        if error <= TARGET_TOLERANCE {
-                            self.stop();
-                            break;
-                        }
+                if error <= TARGET_TOLERANCE {
+                    self.stop();
+                    break;
+                }
 
-                        if error <= TARGET_SLOW_ZONE {
-                            self.drive_down_slow();
-                            self.state.motion = MotionState::MovingDown;
-                        } else {
-                            self.move_down();
-                        }
-                    }
-                    Err(_) => {
-                        self.stop();
-                        return Err(LegError::MoveTimeout);
-                    }
+                if error <= TARGET_SLOW_ZONE {
+                    self.drive_down_slow();
+                    self.state.motion = MotionState::MovingDown;
+                } else {
+                    self.move_down();
                 }
             }
         } else {
