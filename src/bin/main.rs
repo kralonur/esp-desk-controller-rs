@@ -18,7 +18,7 @@ use esp_hal::{
 };
 use esp_pwm_motor::{
     motor::Motor,
-    quadrature::{Quadrature, QuadratureDirection, QuadratureWatcher},
+    quadrature::{Quadrature, QuadratureDirection, QuadratureStorage, QuadratureWatcher},
 };
 use {esp_backtrace as _, esp_println as _};
 
@@ -77,6 +77,7 @@ async fn watch_quadrature(mut watcher: QuadratureWatcher) {
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.2.0
+    static QUADRATURE1_STORAGE: QuadratureStorage = QuadratureStorage::new();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -110,7 +111,8 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap();
     mcpwm.timer0.start(timer_clock_cfg);
 
-    let (quadrature, snapshot) = Quadrature::new(peripherals.GPIO5, peripherals.GPIO6);
+    let (quadrature, snapshot) =
+        Quadrature::new(&QUADRATURE1_STORAGE, peripherals.GPIO5, peripherals.GPIO6);
     let log_watcher = quadrature.watcher();
     let leg_watcher = quadrature.watcher();
     quadrature.spawn(&spawner);

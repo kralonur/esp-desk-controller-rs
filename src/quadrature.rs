@@ -11,8 +11,6 @@ use static_cell::StaticCell;
 const HALL1_BIT: u8 = 0b10;
 const HALL2_BIT: u8 = 0b01;
 
-static QUADRATURE_STATE: StaticCell<QuadratureState> = StaticCell::new();
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuadratureDirection {
     Positive,
@@ -40,6 +38,10 @@ struct QuadratureState {
     position: AtomicI32,
     invalid_transitions: AtomicU32,
     events: Watch<CriticalSectionRawMutex, QuadratureEvent, 4>,
+}
+
+pub struct QuadratureStorage {
+    state: StaticCell<QuadratureState>,
 }
 
 pub struct Quadrature<'a> {
@@ -88,15 +90,24 @@ impl QuadratureState {
     }
 }
 
+impl QuadratureStorage {
+    pub const fn new() -> Self {
+        Self {
+            state: StaticCell::new(),
+        }
+    }
+}
+
 impl Quadrature<'static> {
     pub fn new(
+        storage: &'static QuadratureStorage,
         hall1_pin: impl InputPin + 'static,
         hall2_pin: impl InputPin + 'static,
     ) -> (Self, QuadratureSnapshot) {
         let hall1 = Input::new(hall1_pin, hall_input_config());
         let hall2 = Input::new(hall2_pin, hall_input_config());
         let initial_state = state_from_levels(hall1.level(), hall2.level());
-        let state = QUADRATURE_STATE.init(QuadratureState::new());
+        let state = storage.state.init(QuadratureState::new());
 
         state.initialize(initial_state);
 
