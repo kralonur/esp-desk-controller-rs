@@ -17,6 +17,7 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 use esp_pwm_motor::{
+    leg::{LegStatusStorage, LegStatusWatcher},
     motor::Motor,
     quadrature::{Quadrature, QuadratureDirection, QuadratureStorage, QuadratureWatcher},
 };
@@ -70,6 +71,17 @@ async fn watch_quadrature(mut watcher: QuadratureWatcher) {
     }
 }
 
+#[embassy_executor::task]
+async fn watch_leg_status(mut watcher: LegStatusWatcher) {
+    loop {
+        let status = watcher.wait_for_change().await;
+        info!(
+            "leg status homed={=bool} pos={=i32} min={=i32} max={=i32} motion={:?}",
+            status.homed, status.position, status.min_position, status.max_position, status.motion,
+        );
+    }
+}
+
 #[allow(
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. in main"
@@ -78,6 +90,7 @@ async fn watch_quadrature(mut watcher: QuadratureWatcher) {
 async fn main(spawner: Spawner) -> ! {
     // generator version: 1.2.0
     static QUADRATURE1_STORAGE: QuadratureStorage = QuadratureStorage::new();
+    static LEG1_STATUS_STORAGE: LegStatusStorage = LegStatusStorage::new();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -120,7 +133,9 @@ async fn main(spawner: Spawner) -> ! {
 
     motor.enable();
 
-    let leg = esp_pwm_motor::leg::Leg::new(motor, leg_watcher);
+    let leg = esp_pwm_motor::leg::Leg::new(&LEG1_STATUS_STORAGE, motor, leg_watcher);
+    let leg_status_watcher = leg.status_watcher();
+    spawner.must_spawn(watch_leg_status(leg_status_watcher));
 
     info!(
         "quadrature monitor initialized on GPIO{=u8} and GPIO{=u8}",

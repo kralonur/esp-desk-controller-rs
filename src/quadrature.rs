@@ -90,6 +90,12 @@ impl QuadratureState {
     }
 }
 
+impl Default for QuadratureStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QuadratureStorage {
     pub const fn new() -> Self {
         Self {

@@ -1,9 +1,14 @@
 use defmt::Format;
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex,
+    watch::{Receiver, Watch},
+};
 use embassy_time::{Duration, Instant, Timer, with_deadline};
 use esp_hal::mcpwm::PwmPeripheral;
 
 use crate::motor::Motor;
 use crate::quadrature::{QuadratureDirection, QuadratureWatcher};
+use static_cell::StaticCell;
 
 const STARTUP_DUTY: u16 = 99;
 const RUN_DUTY: u16 = 30;
@@ -21,7 +26,8 @@ const TARGET_TOLERANCE: i32 = 5;
 
 pub struct Unhomed;
 
-enum MotionState {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+pub enum MotionState {
     Idle,
     MovingUp,
     MovingDown,
@@ -36,6 +42,23 @@ pub struct Ready {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+pub struct LegStatus {
+    pub position: i32,
+    pub min_position: i32,
+    pub max_position: i32,
+    pub motion: MotionState,
+    pub homed: bool,
+}
+
+pub struct LegStatusStorage {
+    watch: StaticCell<Watch<CriticalSectionRawMutex, LegStatus, 4>>,
+}
+
+pub struct LegStatusWatcher {
+    receiver: Receiver<'static, CriticalSectionRawMutex, LegStatus, 4>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub enum LegError {
     HomingStartTimeout,
     MoveTimeout,
@@ -44,6 +67,7 @@ pub enum LegError {
 pub struct Leg<'a, State, const OP: u8, PWM: PwmPeripheral> {
     motor: Motor<'a, OP, PWM>,
     quadrature_watcher: QuadratureWatcher,
+    status_watch: &'static Watch<CriticalSectionRawMutex, LegStatus, 4>,
     state: State,
 }
 
@@ -54,6 +78,10 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
 
     fn coast(&mut self) {
         self.motor.coast();
+    }
+
+    fn send_status(&self, status: LegStatus) {
+        self.status_watch.sender().send(status);
     }
 
     fn drive_up_boost(&mut self) {
@@ -116,6 +144,15 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
 
         self.coast();
     }
+
+    pub fn status_watcher(&self) -> LegStatusWatcher {
+        let receiver = self
+            .status_watch
+            .receiver()
+            .expect("leg status watch receiver limit reached");
+
+        LegStatusWatcher { receiver }
+    }
 }
 
 fn opposite_direction(direction: QuadratureDirection) -> QuadratureDirection {
@@ -126,13 +163,51 @@ fn opposite_direction(direction: QuadratureDirection) -> QuadratureDirection {
     }
 }
 
-impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
-    pub fn new(motor: Motor<'a, OP, PWM>, quadrature_watcher: QuadratureWatcher) -> Self {
+impl Default for LegStatusStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LegStatusStorage {
+    pub const fn new() -> Self {
         Self {
+            watch: StaticCell::new(),
+        }
+    }
+}
+
+impl LegStatusWatcher {
+    pub async fn wait_for_change(&mut self) -> LegStatus {
+        self.receiver.changed().await
+    }
+}
+
+impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
+    fn status(&self) -> LegStatus {
+        LegStatus {
+            position: self.position(),
+            min_position: 0,
+            max_position: 0,
+            motion: MotionState::Idle,
+            homed: false,
+        }
+    }
+
+    pub fn new(
+        storage: &'static LegStatusStorage,
+        motor: Motor<'a, OP, PWM>,
+        quadrature_watcher: QuadratureWatcher,
+    ) -> Self {
+        let status_watch = storage.watch.init(Watch::new());
+        let leg = Self {
             motor,
             quadrature_watcher,
+            status_watch,
             state: Unhomed,
-        }
+        };
+        leg.send_status(leg.status());
+        leg
     }
 
     pub async fn home_down(mut self) -> Result<Leg<'a, Ready, OP, PWM>, (Self, LegError)> {
@@ -140,6 +215,10 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
         let start_deadline = Instant::now() + HOMING_START_TIMEOUT;
 
         self.drive_down_boost();
+        self.send_status(LegStatus {
+            motion: MotionState::MovingDown,
+            ..self.status()
+        });
 
         let homing_direction = loop {
             let current_position = self.position();
@@ -177,6 +256,10 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
             if progressed {
                 last_position = current_position;
                 last_progress_at = Instant::now();
+                self.send_status(LegStatus {
+                    motion: MotionState::MovingDown,
+                    ..self.status()
+                });
                 continue;
             }
 
@@ -192,9 +275,10 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
             .await;
         self.quadrature_watcher.reset_position();
 
-        Ok(Leg {
+        let leg = Leg {
             motor: self.motor,
             quadrature_watcher: self.quadrature_watcher,
+            status_watch: self.status_watch,
             state: Ready {
                 min_position: 0,
                 max_position: DEFAULT_MAX_POSITION,
@@ -202,11 +286,28 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
                 down_direction: homing_direction,
                 motion: MotionState::Idle,
             },
-        })
+        };
+        leg.send_status(leg.status());
+
+        Ok(leg)
     }
 }
 
 impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
+    pub fn status(&self) -> LegStatus {
+        LegStatus {
+            position: self.position(),
+            min_position: self.state.min_position,
+            max_position: self.state.max_position,
+            motion: self.state.motion,
+            homed: true,
+        }
+    }
+
+    pub fn motion(&self) -> MotionState {
+        self.state.motion
+    }
+
     pub fn min_position(&self) -> i32 {
         self.state.min_position
     }
@@ -217,6 +318,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
 
     pub fn set_max_position(&mut self, max_position: i32) {
         self.state.max_position = max_position.max(self.state.min_position);
+        self.send_status(self.status());
     }
 
     pub fn clamp_target(&self, target_position: i32) -> i32 {
@@ -231,6 +333,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
 
         self.drive_up_run();
         self.state.motion = MotionState::MovingUp;
+        self.send_status(self.status());
     }
 
     pub fn move_down(&mut self) {
@@ -241,11 +344,13 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
 
         self.drive_down_run();
         self.state.motion = MotionState::MovingDown;
+        self.send_status(self.status());
     }
 
     pub fn stop(&mut self) {
         self.coast();
         self.state.motion = MotionState::Idle;
+        self.send_status(self.status());
     }
 
     async fn wait_for_progress(
@@ -307,8 +412,10 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         }
 
         while steps_taken < startup_steps {
-            self.wait_for_progress(direction, MOVE_STALL_TIMEOUT).await?;
+            self.wait_for_progress(direction, MOVE_STALL_TIMEOUT)
+                .await?;
             steps_taken += 1;
+            self.send_status(self.status());
         }
 
         match direction {
@@ -318,8 +425,10 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         }
 
         while steps_taken < steps {
-            self.wait_for_progress(direction, MOVE_STALL_TIMEOUT).await?;
+            self.wait_for_progress(direction, MOVE_STALL_TIMEOUT)
+                .await?;
             steps_taken += 1;
+            self.send_status(self.status());
         }
 
         self.stop();
@@ -352,6 +461,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                     .wait_for_progress(self.state.up_direction, MOVE_STALL_TIMEOUT)
                     .await?;
                 let error = target_position - event.snapshot.position;
+                self.send_status(self.status());
 
                 if error <= TARGET_TOLERANCE {
                     self.stop();
@@ -374,6 +484,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                     .wait_for_progress(self.state.down_direction, MOVE_STALL_TIMEOUT)
                     .await?;
                 let error = event.snapshot.position - target_position;
+                self.send_status(self.status());
 
                 if error <= TARGET_TOLERANCE {
                     self.stop();
