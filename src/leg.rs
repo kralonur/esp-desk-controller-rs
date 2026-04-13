@@ -1,5 +1,9 @@
+use core::cell::RefCell;
+
 use defmt::Format;
+use embassy_executor::Spawner;
 use embassy_sync::{
+    blocking_mutex::Mutex,
     blocking_mutex::raw::CriticalSectionRawMutex,
     watch::{Receiver, Watch},
 };
@@ -51,11 +55,16 @@ pub struct LegStatus {
 }
 
 pub struct LegStatusStorage {
-    watch: StaticCell<Watch<CriticalSectionRawMutex, LegStatus, 4>>,
+    state: StaticCell<LegStatusState>,
 }
 
 pub struct LegStatusWatcher {
     receiver: Receiver<'static, CriticalSectionRawMutex, LegStatus, 4>,
+}
+
+struct LegStatusState {
+    status: Mutex<CriticalSectionRawMutex, RefCell<LegStatus>>,
+    watch: Watch<CriticalSectionRawMutex, LegStatus, 4>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
@@ -67,7 +76,7 @@ pub enum LegError {
 pub struct Leg<'a, State, const OP: u8, PWM: PwmPeripheral> {
     motor: Motor<'a, OP, PWM>,
     quadrature_watcher: QuadratureWatcher,
-    status_watch: &'static Watch<CriticalSectionRawMutex, LegStatus, 4>,
+    status_state: &'static LegStatusState,
     state: State,
 }
 
@@ -76,12 +85,16 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         self.quadrature_watcher.snapshot().position
     }
 
+    fn current_status(&self) -> LegStatus {
+        self.status_state.current()
+    }
+
     fn coast(&mut self) {
         self.motor.coast();
     }
 
     fn send_status(&self, status: LegStatus) {
-        self.status_watch.sender().send(status);
+        self.status_state.publish(status);
     }
 
     fn drive_up_boost(&mut self) {
@@ -122,6 +135,10 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         }
 
         self.drive_up_boost();
+        self.send_status(LegStatus {
+            motion: MotionState::MovingUp,
+            ..self.current_status()
+        });
 
         let startup_steps = steps.min(STARTUP_EVENTS);
         let mut steps_taken = 0;
@@ -143,15 +160,60 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         }
 
         self.coast();
+        self.send_status(LegStatus {
+            motion: MotionState::Idle,
+            ..self.current_status()
+        });
     }
 
     pub fn status_watcher(&self) -> LegStatusWatcher {
         let receiver = self
-            .status_watch
+            .status_state
+            .watch
             .receiver()
             .expect("leg status watch receiver limit reached");
 
         LegStatusWatcher { receiver }
+    }
+}
+
+impl LegStatusState {
+    fn new(initial_status: LegStatus) -> Self {
+        Self {
+            status: Mutex::new(RefCell::new(initial_status)),
+            watch: Watch::new(),
+        }
+    }
+
+    fn current(&self) -> LegStatus {
+        self.status.lock(|status| *status.borrow())
+    }
+
+    fn publish(&self, status: LegStatus) {
+        self.status.lock(|cached_status| {
+            *cached_status.borrow_mut() = status;
+        });
+        self.watch.sender().send(status);
+    }
+
+    fn publish_position(&self, position: i32) {
+        let status = self.status.lock(|cached_status| {
+            let mut cached_status = cached_status.borrow_mut();
+            cached_status.position = position;
+            *cached_status
+        });
+        self.watch.sender().send(status);
+    }
+}
+
+#[embassy_executor::task(pool_size = 4)]
+async fn mirror_quadrature_to_leg_status(
+    mut quadrature_watcher: QuadratureWatcher,
+    status_state: &'static LegStatusState,
+) {
+    loop {
+        let event = quadrature_watcher.wait_for_change().await;
+        status_state.publish_position(event.snapshot.position);
     }
 }
 
@@ -172,7 +234,7 @@ impl Default for LegStatusStorage {
 impl LegStatusStorage {
     pub const fn new() -> Self {
         Self {
-            watch: StaticCell::new(),
+            state: StaticCell::new(),
         }
     }
 }
@@ -198,12 +260,25 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
         storage: &'static LegStatusStorage,
         motor: Motor<'a, OP, PWM>,
         quadrature_watcher: QuadratureWatcher,
+        status_quadrature_watcher: QuadratureWatcher,
+        spawner: &Spawner,
     ) -> Self {
-        let status_watch = storage.watch.init(Watch::new());
+        let initial_status = LegStatus {
+            position: quadrature_watcher.snapshot().position,
+            min_position: 0,
+            max_position: 0,
+            motion: MotionState::Idle,
+            homed: false,
+        };
+        let status_state = storage.state.init(LegStatusState::new(initial_status));
+        spawner.must_spawn(mirror_quadrature_to_leg_status(
+            status_quadrature_watcher,
+            status_state,
+        ));
         let leg = Self {
             motor,
             quadrature_watcher,
-            status_watch,
+            status_state,
             state: Unhomed,
         };
         leg.send_status(leg.status());
@@ -278,7 +353,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
         let leg = Leg {
             motor: self.motor,
             quadrature_watcher: self.quadrature_watcher,
-            status_watch: self.status_watch,
+            status_state: self.status_state,
             state: Ready {
                 min_position: 0,
                 max_position: DEFAULT_MAX_POSITION,
@@ -410,12 +485,12 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                 return Ok(());
             }
         }
+        self.send_status(self.status());
 
         while steps_taken < startup_steps {
             self.wait_for_progress(direction, MOVE_STALL_TIMEOUT)
                 .await?;
             steps_taken += 1;
-            self.send_status(self.status());
         }
 
         match direction {
@@ -428,7 +503,6 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             self.wait_for_progress(direction, MOVE_STALL_TIMEOUT)
                 .await?;
             steps_taken += 1;
-            self.send_status(self.status());
         }
 
         self.stop();
@@ -455,13 +529,13 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         if target_position > current_position {
             self.drive_up_boost();
             self.state.motion = MotionState::MovingUp;
+            self.send_status(self.status());
 
             loop {
                 let event = self
                     .wait_for_progress(self.state.up_direction, MOVE_STALL_TIMEOUT)
                     .await?;
                 let error = target_position - event.snapshot.position;
-                self.send_status(self.status());
 
                 if error <= TARGET_TOLERANCE {
                     self.stop();
@@ -478,13 +552,13 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         } else if target_position < current_position {
             self.drive_down_boost();
             self.state.motion = MotionState::MovingDown;
+            self.send_status(self.status());
 
             loop {
                 let event = self
                     .wait_for_progress(self.state.down_direction, MOVE_STALL_TIMEOUT)
                     .await?;
                 let error = event.snapshot.position - target_position;
-                self.send_status(self.status());
 
                 if error <= TARGET_TOLERANCE {
                     self.stop();

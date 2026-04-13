@@ -128,12 +128,19 @@ async fn main(spawner: Spawner) -> ! {
         Quadrature::new(&QUADRATURE1_STORAGE, peripherals.GPIO5, peripherals.GPIO6);
     let log_watcher = quadrature.watcher();
     let leg_watcher = quadrature.watcher();
+    let leg_status_source = quadrature.watcher();
     quadrature.spawn(&spawner);
     spawner.must_spawn(watch_quadrature(log_watcher));
 
     motor.enable();
 
-    let leg = esp_pwm_motor::leg::Leg::new(&LEG1_STATUS_STORAGE, motor, leg_watcher);
+    let leg = esp_pwm_motor::leg::Leg::new(
+        &LEG1_STATUS_STORAGE,
+        motor,
+        leg_watcher,
+        leg_status_source,
+        &spawner,
+    );
     let leg_status_watcher = leg.status_watcher();
     spawner.must_spawn(watch_leg_status(leg_status_watcher));
 
