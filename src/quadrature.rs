@@ -149,6 +149,20 @@ impl Quadrature<'static> {
 }
 
 impl QuadratureWatcher {
+    pub fn resubscribe(&self) -> Self {
+        let mut receiver = self
+            .state
+            .events
+            .receiver()
+            .expect("quadrature watch receiver limit reached");
+        let _ = receiver.try_get();
+
+        Self {
+            receiver,
+            state: self.state,
+        }
+    }
+
     pub fn snapshot(&self) -> QuadratureSnapshot {
         self.state.snapshot()
     }
@@ -250,7 +264,7 @@ fn update_quadrature_state(state: &'static QuadratureState, channel: u8, bit: u8
     }
 }
 
-#[embassy_executor::task(pool_size = 2)]
+#[embassy_executor::task(pool_size = 4)]
 async fn monitor_hall(
     channel: u8,
     bit: u8,

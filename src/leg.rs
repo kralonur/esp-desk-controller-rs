@@ -15,6 +15,7 @@ use crate::quadrature::{QuadratureDirection, QuadratureWatcher};
 use static_cell::StaticCell;
 
 const STARTUP_DUTY: u16 = 99;
+const MAX_DUTY: u16 = 99;
 const RUN_DUTY: u16 = 30;
 const SLOW_DUTY: u16 = 15;
 const HOMING_DUTY: u16 = 20;
@@ -29,6 +30,18 @@ const TARGET_SLOW_ZONE: i32 = 10;
 const TARGET_TOLERANCE: i32 = 5;
 
 pub struct Unhomed;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+pub enum DriveSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegConfig {
+    pub up_drive: DriveSide,
+    pub up_direction: QuadratureDirection,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub enum MotionState {
@@ -55,6 +68,11 @@ pub struct LegStatus {
     pub homed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+pub struct LegProgress {
+    pub position: i32,
+}
+
 pub struct LegStatusStorage {
     state: StaticCell<LegStatusState>,
 }
@@ -63,8 +81,13 @@ pub struct LegStatusWatcher {
     receiver: Receiver<'static, CriticalSectionRawMutex, LegStatus, 4>,
 }
 
+pub struct LegProgressWatcher {
+    quadrature_watcher: QuadratureWatcher,
+    position_sign: i32,
+}
+
 struct LegStatusState {
-    position_sign: Mutex<CriticalSectionRawMutex, RefCell<i32>>,
+    position_sign: i32,
     status: Mutex<CriticalSectionRawMutex, RefCell<LegStatus>>,
     watch: Watch<CriticalSectionRawMutex, LegStatus, 4>,
 }
@@ -72,22 +95,23 @@ struct LegStatusState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub enum LegError {
     HomingStartTimeout,
+    PolarityMismatch,
     MoveTimeout,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DriveMode {
+pub enum DriveMode {
     Stop,
     UpBoost,
     UpRun,
     UpSlow,
     DownBoost,
-    DownRun,
     DownSlow,
     HomeDown,
 }
 
 pub struct Leg<'a, State, const OP: u8, PWM: PwmPeripheral> {
+    config: LegConfig,
     motor: Motor<'a, OP, PWM>,
     quadrature_watcher: QuadratureWatcher,
     status_state: &'static LegStatusState,
@@ -95,16 +119,40 @@ pub struct Leg<'a, State, const OP: u8, PWM: PwmPeripheral> {
 }
 
 impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
+    fn configured_up_direction(&self) -> QuadratureDirection {
+        self.config.up_direction
+    }
+
+    fn configured_down_direction(&self) -> QuadratureDirection {
+        opposite_direction(self.config.up_direction)
+    }
+
+    fn position_sign(&self) -> i32 {
+        match self.config.up_direction {
+            QuadratureDirection::Positive => 1,
+            QuadratureDirection::Negative => -1,
+            QuadratureDirection::Invalid => 1,
+        }
+    }
+
     pub fn logical_position(&self) -> i32 {
         self.current_status().position
     }
 
-    pub(crate) fn encoder_position(&self) -> i32 {
+    pub fn encoder_position(&self) -> i32 {
         self.quadrature_watcher.snapshot().position
     }
 
-    pub(crate) fn reset_position(&self) {
+    pub fn reset_position(&self) {
         self.quadrature_watcher.reset_position();
+    }
+
+    pub fn up_direction(&self) -> QuadratureDirection {
+        self.configured_up_direction()
+    }
+
+    pub fn down_direction(&self) -> QuadratureDirection {
+        self.configured_down_direction()
     }
 
     fn current_status(&self) -> LegStatus {
@@ -115,14 +163,13 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         self.motor.coast();
     }
 
-    pub(crate) fn apply_drive_mode(&mut self, mode: DriveMode) {
+    pub fn apply_drive_mode(&mut self, mode: DriveMode) {
         match mode {
             DriveMode::Stop => self.coast(),
             DriveMode::UpBoost => self.drive_up_boost(),
             DriveMode::UpRun => self.drive_up_run(),
             DriveMode::UpSlow => self.drive_up_slow(),
             DriveMode::DownBoost => self.drive_down_boost(),
-            DriveMode::DownRun => self.drive_down_run(),
             DriveMode::DownSlow => self.drive_down_slow(),
             DriveMode::HomeDown => self.drive_home_down(),
         }
@@ -130,10 +177,9 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         let motion = match mode {
             DriveMode::Stop => MotionState::Idle,
             DriveMode::UpBoost | DriveMode::UpRun | DriveMode::UpSlow => MotionState::MovingUp,
-            DriveMode::DownBoost
-            | DriveMode::DownRun
-            | DriveMode::DownSlow
-            | DriveMode::HomeDown => MotionState::MovingDown,
+            DriveMode::DownBoost | DriveMode::DownSlow | DriveMode::HomeDown => {
+                MotionState::MovingDown
+            }
         };
 
         self.send_status(LegStatus {
@@ -146,32 +192,79 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         self.status_state.publish(status);
     }
 
+    pub fn drive_up_duty(&mut self, duty: u16) {
+        let duty = if self.current_status().motion != MotionState::MovingUp {
+            STARTUP_DUTY
+        } else {
+            duty
+        };
+        self.drive_side(self.config.up_drive, duty);
+        self.send_status(LegStatus {
+            motion: MotionState::MovingUp,
+            ..self.current_status()
+        });
+    }
+
+    pub fn drive_down_duty(&mut self, duty: u16) {
+        let duty = if self.current_status().motion != MotionState::MovingDown {
+            STARTUP_DUTY
+        } else {
+            duty
+        };
+        self.drive_side(opposite_drive_side(self.config.up_drive), duty);
+        self.send_status(LegStatus {
+            motion: MotionState::MovingDown,
+            ..self.current_status()
+        });
+    }
+
+    pub fn drive_home_down_duty(&mut self, duty: u16) {
+        let duty = if self.current_status().motion != MotionState::MovingDown {
+            STARTUP_DUTY
+        } else {
+            duty
+        };
+        self.drive_side(opposite_drive_side(self.config.up_drive), duty);
+        self.send_status(LegStatus {
+            motion: MotionState::MovingDown,
+            ..self.current_status()
+        });
+    }
+
     fn drive_up_boost(&mut self) {
-        self.motor.drive_left(STARTUP_DUTY);
+        self.drive_side(self.config.up_drive, STARTUP_DUTY);
     }
 
     fn drive_down_boost(&mut self) {
-        self.motor.drive_right(STARTUP_DUTY);
+        self.drive_side(opposite_drive_side(self.config.up_drive), STARTUP_DUTY);
     }
 
     fn drive_up_run(&mut self) {
-        self.motor.drive_left(RUN_DUTY);
+        self.drive_side(self.config.up_drive, RUN_DUTY);
     }
 
     fn drive_down_run(&mut self) {
-        self.motor.drive_right(RUN_DUTY);
+        self.drive_side(opposite_drive_side(self.config.up_drive), RUN_DUTY);
     }
 
     fn drive_up_slow(&mut self) {
-        self.motor.drive_left(SLOW_DUTY);
+        self.drive_side(self.config.up_drive, SLOW_DUTY);
     }
 
     fn drive_down_slow(&mut self) {
-        self.motor.drive_right(SLOW_DUTY);
+        self.drive_side(opposite_drive_side(self.config.up_drive), SLOW_DUTY);
     }
 
     fn drive_home_down(&mut self) {
-        self.motor.drive_right(HOMING_DUTY);
+        self.drive_side(opposite_drive_side(self.config.up_drive), HOMING_DUTY);
+    }
+
+    fn drive_side(&mut self, side: DriveSide, duty: u16) {
+        let duty = duty.min(MAX_DUTY);
+        match side {
+            DriveSide::Left => self.motor.drive_left(duty),
+            DriveSide::Right => self.motor.drive_right(duty),
+        }
     }
 
     async fn move_up_steps(&mut self, expected_direction: QuadratureDirection, steps: u16) {
@@ -216,12 +309,19 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
 
         LegStatusWatcher { receiver }
     }
+
+    pub fn progress_watcher(&self) -> LegProgressWatcher {
+        LegProgressWatcher {
+            quadrature_watcher: self.quadrature_watcher.resubscribe(),
+            position_sign: self.position_sign(),
+        }
+    }
 }
 
 impl LegStatusState {
-    fn new(initial_status: LegStatus) -> Self {
+    fn new(initial_status: LegStatus, position_sign: i32) -> Self {
         Self {
-            position_sign: Mutex::new(RefCell::new(1)),
+            position_sign,
             status: Mutex::new(RefCell::new(initial_status)),
             watch: Watch::new(),
         }
@@ -232,31 +332,38 @@ impl LegStatusState {
     }
 
     fn publish(&self, status: LegStatus) {
-        self.status.lock(|cached_status| {
-            *cached_status.borrow_mut() = status;
+        let changed = self.status.lock(|cached_status| {
+            let mut cached_status = cached_status.borrow_mut();
+            if *cached_status == status {
+                false
+            } else {
+                *cached_status = status;
+                true
+            }
         });
-        self.watch.sender().send(status);
-    }
-
-    fn set_position_sign(&self, position_sign: i32) {
-        self.position_sign.lock(|cached_sign| {
-            *cached_sign.borrow_mut() = position_sign;
-        });
+        if changed {
+            self.watch.sender().send(status);
+        }
     }
 
     fn logical_position(&self, raw_position: i32) -> i32 {
-        let position_sign = self.position_sign.lock(|cached_sign| *cached_sign.borrow());
-        raw_position * position_sign
+        raw_position * self.position_sign
     }
 
     fn publish_position(&self, raw_position: i32) {
         let position = self.logical_position(raw_position);
-        let status = self.status.lock(|cached_status| {
+        let (status, changed) = self.status.lock(|cached_status| {
             let mut cached_status = cached_status.borrow_mut();
-            cached_status.position = position;
-            *cached_status
+            if cached_status.position == position {
+                (*cached_status, false)
+            } else {
+                cached_status.position = position;
+                (*cached_status, true)
+            }
         });
-        self.watch.sender().send(status);
+        if changed {
+            self.watch.sender().send(status);
+        }
     }
 }
 
@@ -276,6 +383,25 @@ fn opposite_direction(direction: QuadratureDirection) -> QuadratureDirection {
         QuadratureDirection::Positive => QuadratureDirection::Negative,
         QuadratureDirection::Negative => QuadratureDirection::Positive,
         QuadratureDirection::Invalid => QuadratureDirection::Invalid,
+    }
+}
+
+fn opposite_drive_side(side: DriveSide) -> DriveSide {
+    match side {
+        DriveSide::Left => DriveSide::Right,
+        DriveSide::Right => DriveSide::Left,
+    }
+}
+
+fn progressed_in_direction(
+    last_position: i32,
+    current_position: i32,
+    direction: QuadratureDirection,
+) -> bool {
+    match direction {
+        QuadratureDirection::Positive => current_position > last_position,
+        QuadratureDirection::Negative => current_position < last_position,
+        QuadratureDirection::Invalid => false,
     }
 }
 
@@ -299,6 +425,15 @@ impl LegStatusWatcher {
     }
 }
 
+impl LegProgressWatcher {
+    pub async fn wait_for_change(&mut self) -> LegProgress {
+        let event = self.quadrature_watcher.wait_for_change().await;
+        LegProgress {
+            position: event.snapshot.position * self.position_sign,
+        }
+    }
+}
+
 impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
     fn status(&self) -> LegStatus {
         LegStatus {
@@ -312,6 +447,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
 
     pub fn new(
         storage: &'static LegStatusStorage,
+        config: LegConfig,
         motor: Motor<'a, OP, PWM>,
         quadrature_watcher: QuadratureWatcher,
         status_quadrature_watcher: QuadratureWatcher,
@@ -324,12 +460,20 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
             motion: MotionState::Idle,
             homed: false,
         };
-        let status_state = storage.state.init(LegStatusState::new(initial_status));
+        let status_state = storage.state.init(LegStatusState::new(
+            initial_status,
+            match config.up_direction {
+                QuadratureDirection::Positive => 1,
+                QuadratureDirection::Negative => -1,
+                QuadratureDirection::Invalid => 1,
+            },
+        ));
         spawner.must_spawn(mirror_quadrature_to_leg_status(
             status_quadrature_watcher,
             status_state,
         ));
         let leg = Self {
+            config,
             motor,
             quadrature_watcher,
             status_state,
@@ -342,18 +486,21 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
     pub async fn home_down(mut self) -> Result<Leg<'a, Ready, OP, PWM>, (Self, LegError)> {
         let start_position = self.encoder_position();
         let start_deadline = Instant::now() + HOMING_START_TIMEOUT;
+        let down_direction = self.configured_down_direction();
+        let up_direction = self.configured_up_direction();
 
         self.apply_drive_mode(DriveMode::DownBoost);
 
-        let homing_direction = loop {
+        loop {
             let current_position = self.encoder_position();
 
-            if current_position > start_position {
-                break QuadratureDirection::Positive;
+            if progressed_in_direction(start_position, current_position, down_direction) {
+                break;
             }
 
-            if current_position < start_position {
-                break QuadratureDirection::Negative;
+            if progressed_in_direction(start_position, current_position, up_direction) {
+                self.coast();
+                return Err((self, LegError::PolarityMismatch));
             }
 
             if Instant::now() >= start_deadline {
@@ -362,7 +509,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
             }
 
             Timer::after(HOMING_POLL_INTERVAL).await;
-        };
+        }
 
         let mut last_position = self.encoder_position();
         let mut last_progress_at = Instant::now();
@@ -372,11 +519,8 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
             Timer::after(HOMING_POLL_INTERVAL).await;
 
             let current_position = self.encoder_position();
-            let progressed = match homing_direction {
-                QuadratureDirection::Positive => current_position > last_position,
-                QuadratureDirection::Negative => current_position < last_position,
-                QuadratureDirection::Invalid => false,
-            };
+            let progressed =
+                progressed_in_direction(last_position, current_position, down_direction);
 
             if progressed {
                 last_position = current_position;
@@ -390,31 +534,24 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
         }
 
         self.apply_drive_mode(DriveMode::Stop);
-        let backoff_direction = opposite_direction(homing_direction);
-
-        self.move_up_steps(backoff_direction, HOMING_BACKOFF_STEPS)
-            .await;
+        self.move_up_steps(up_direction, HOMING_BACKOFF_STEPS).await;
         self.quadrature_watcher.reset_position();
-        let leg = self.into_ready(homing_direction);
+        let leg = self.into_ready();
         leg.send_status(leg.status());
 
         Ok(leg)
     }
 
-    pub(crate) fn into_ready(
-        self,
-        homing_direction: QuadratureDirection,
-    ) -> Leg<'a, Ready, OP, PWM> {
-        let position_sign = match opposite_direction(homing_direction) {
-            QuadratureDirection::Positive => 1,
-            QuadratureDirection::Negative => -1,
-            QuadratureDirection::Invalid => 1,
-        };
-        self.status_state.set_position_sign(position_sign);
+    pub fn into_ready(self) -> Leg<'a, Ready, OP, PWM> {
+        let position_sign = self.position_sign();
+        let up_direction = self.configured_up_direction();
+        let down_direction = self.configured_down_direction();
+
         self.status_state
             .publish_position(self.quadrature_watcher.snapshot().position);
 
         Leg {
+            config: self.config,
             motor: self.motor,
             quadrature_watcher: self.quadrature_watcher,
             status_state: self.status_state,
@@ -422,8 +559,8 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
                 min_position: 0,
                 max_position: DEFAULT_MAX_POSITION,
                 position_sign,
-                up_direction: opposite_direction(homing_direction),
-                down_direction: homing_direction,
+                up_direction,
+                down_direction,
                 motion: MotionState::Idle,
             },
         }
@@ -436,50 +573,42 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
     }
 
     pub fn status(&self) -> LegStatus {
-        LegStatus {
-            position: self.logical_position(),
-            min_position: self.state.min_position,
-            max_position: self.state.max_position,
-            motion: self.state.motion,
-            homed: true,
-        }
+        let mut status = self.current_status();
+        status.min_position = self.state.min_position;
+        status.max_position = self.state.max_position;
+        status.homed = true;
+        status
     }
 
     pub fn motion(&self) -> MotionState {
-        self.state.motion
+        self.current_status().motion
     }
 
-    pub(crate) fn start_up_boost(&mut self) {
+    pub fn publish_status(&self) {
+        self.send_status(self.status());
+    }
+
+    pub fn start_up_boost(&mut self) {
         self.state.motion = MotionState::MovingUp;
         self.apply_drive_mode(DriveMode::UpBoost);
     }
 
-    pub(crate) fn start_up_run(&mut self) {
-        self.state.motion = MotionState::MovingUp;
-        self.apply_drive_mode(DriveMode::UpRun);
-    }
-
-    pub(crate) fn start_up_slow(&mut self) {
+    pub fn start_up_slow(&mut self) {
         self.state.motion = MotionState::MovingUp;
         self.apply_drive_mode(DriveMode::UpSlow);
     }
 
-    pub(crate) fn start_down_boost(&mut self) {
+    pub fn start_down_boost(&mut self) {
         self.state.motion = MotionState::MovingDown;
         self.apply_drive_mode(DriveMode::DownBoost);
     }
 
-    pub(crate) fn start_down_run(&mut self) {
-        self.state.motion = MotionState::MovingDown;
-        self.apply_drive_mode(DriveMode::DownRun);
-    }
-
-    pub(crate) fn start_down_slow(&mut self) {
+    pub fn start_down_slow(&mut self) {
         self.state.motion = MotionState::MovingDown;
         self.apply_drive_mode(DriveMode::DownSlow);
     }
 
-    pub(crate) fn stop_for_desk(&mut self) {
+    pub fn stop_for_desk(&mut self) {
         self.stop();
     }
 
