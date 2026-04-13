@@ -73,6 +73,18 @@ pub enum LegError {
     MoveTimeout,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DriveMode {
+    Stop,
+    UpBoost,
+    UpRun,
+    UpSlow,
+    DownBoost,
+    DownRun,
+    DownSlow,
+    HomeDown,
+}
+
 pub struct Leg<'a, State, const OP: u8, PWM: PwmPeripheral> {
     motor: Motor<'a, OP, PWM>,
     quadrature_watcher: QuadratureWatcher,
@@ -91,6 +103,33 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
 
     fn coast(&mut self) {
         self.motor.coast();
+    }
+
+    pub(crate) fn apply_drive_mode(&mut self, mode: DriveMode) {
+        match mode {
+            DriveMode::Stop => self.coast(),
+            DriveMode::UpBoost => self.drive_up_boost(),
+            DriveMode::UpRun => self.drive_up_run(),
+            DriveMode::UpSlow => self.drive_up_slow(),
+            DriveMode::DownBoost => self.drive_down_boost(),
+            DriveMode::DownRun => self.drive_down_run(),
+            DriveMode::DownSlow => self.drive_down_slow(),
+            DriveMode::HomeDown => self.drive_home_down(),
+        }
+
+        let motion = match mode {
+            DriveMode::Stop => MotionState::Idle,
+            DriveMode::UpBoost | DriveMode::UpRun | DriveMode::UpSlow => MotionState::MovingUp,
+            DriveMode::DownBoost
+            | DriveMode::DownRun
+            | DriveMode::DownSlow
+            | DriveMode::HomeDown => MotionState::MovingDown,
+        };
+
+        self.send_status(LegStatus {
+            motion,
+            ..self.current_status()
+        });
     }
 
     fn send_status(&self, status: LegStatus) {
@@ -134,11 +173,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
             return;
         }
 
-        self.drive_up_boost();
-        self.send_status(LegStatus {
-            motion: MotionState::MovingUp,
-            ..self.current_status()
-        });
+        self.apply_drive_mode(DriveMode::UpBoost);
 
         let startup_steps = steps.min(STARTUP_EVENTS);
         let mut steps_taken = 0;
@@ -150,7 +185,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
             steps_taken += 1;
         }
 
-        self.drive_up_run();
+        self.apply_drive_mode(DriveMode::UpRun);
 
         while steps_taken < steps {
             self.quadrature_watcher
@@ -159,11 +194,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
             steps_taken += 1;
         }
 
-        self.coast();
-        self.send_status(LegStatus {
-            motion: MotionState::Idle,
-            ..self.current_status()
-        });
+        self.apply_drive_mode(DriveMode::Stop);
     }
 
     pub fn status_watcher(&self) -> LegStatusWatcher {
@@ -289,11 +320,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
         let start_position = self.position();
         let start_deadline = Instant::now() + HOMING_START_TIMEOUT;
 
-        self.drive_down_boost();
-        self.send_status(LegStatus {
-            motion: MotionState::MovingDown,
-            ..self.status()
-        });
+        self.apply_drive_mode(DriveMode::DownBoost);
 
         let homing_direction = loop {
             let current_position = self.position();
@@ -316,7 +343,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
 
         let mut last_position = self.position();
         let mut last_progress_at = Instant::now();
-        self.drive_home_down();
+        self.apply_drive_mode(DriveMode::HomeDown);
 
         loop {
             Timer::after(HOMING_POLL_INTERVAL).await;
@@ -331,10 +358,6 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
             if progressed {
                 last_position = current_position;
                 last_progress_at = Instant::now();
-                self.send_status(LegStatus {
-                    motion: MotionState::MovingDown,
-                    ..self.status()
-                });
                 continue;
             }
 
@@ -343,7 +366,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
             }
         }
 
-        self.coast();
+        self.apply_drive_mode(DriveMode::Stop);
         let backoff_direction = opposite_direction(homing_direction);
 
         self.move_up_steps(backoff_direction, HOMING_BACKOFF_STEPS)
@@ -381,6 +404,40 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
 
     pub fn motion(&self) -> MotionState {
         self.state.motion
+    }
+
+    pub(crate) fn start_up_boost(&mut self) {
+        self.state.motion = MotionState::MovingUp;
+        self.apply_drive_mode(DriveMode::UpBoost);
+    }
+
+    pub(crate) fn start_up_run(&mut self) {
+        self.state.motion = MotionState::MovingUp;
+        self.apply_drive_mode(DriveMode::UpRun);
+    }
+
+    pub(crate) fn start_up_slow(&mut self) {
+        self.state.motion = MotionState::MovingUp;
+        self.apply_drive_mode(DriveMode::UpSlow);
+    }
+
+    pub(crate) fn start_down_boost(&mut self) {
+        self.state.motion = MotionState::MovingDown;
+        self.apply_drive_mode(DriveMode::DownBoost);
+    }
+
+    pub(crate) fn start_down_run(&mut self) {
+        self.state.motion = MotionState::MovingDown;
+        self.apply_drive_mode(DriveMode::DownRun);
+    }
+
+    pub(crate) fn start_down_slow(&mut self) {
+        self.state.motion = MotionState::MovingDown;
+        self.apply_drive_mode(DriveMode::DownSlow);
+    }
+
+    pub(crate) fn stop_for_desk(&mut self) {
+        self.stop();
     }
 
     pub fn min_position(&self) -> i32 {
@@ -527,9 +584,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         }
 
         if target_position > current_position {
-            self.drive_up_boost();
-            self.state.motion = MotionState::MovingUp;
-            self.send_status(self.status());
+            self.start_up_boost();
 
             loop {
                 let event = self
@@ -543,16 +598,13 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                 }
 
                 if error <= TARGET_SLOW_ZONE {
-                    self.drive_up_slow();
-                    self.state.motion = MotionState::MovingUp;
+                    self.start_up_slow();
                 } else {
                     self.move_up();
                 }
             }
         } else if target_position < current_position {
-            self.drive_down_boost();
-            self.state.motion = MotionState::MovingDown;
-            self.send_status(self.status());
+            self.start_down_boost();
 
             loop {
                 let event = self
@@ -566,8 +618,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                 }
 
                 if error <= TARGET_SLOW_ZONE {
-                    self.drive_down_slow();
-                    self.state.motion = MotionState::MovingDown;
+                    self.start_down_slow();
                 } else {
                     self.move_down();
                 }
