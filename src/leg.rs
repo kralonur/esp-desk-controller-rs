@@ -588,6 +588,25 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         self.send_status(self.status());
     }
 
+    pub fn into_unhomed(mut self) -> Leg<'a, Unhomed, OP, PWM> {
+        self.coast();
+        self.send_status(LegStatus {
+            position: self.logical_position(),
+            min_position: 0,
+            max_position: 0,
+            motion: MotionState::Idle,
+            homed: false,
+        });
+
+        Leg {
+            config: self.config,
+            motor: self.motor,
+            quadrature_watcher: self.quadrature_watcher,
+            status_state: self.status_state,
+            state: Unhomed,
+        }
+    }
+
     pub fn start_up_boost(&mut self) {
         self.state.motion = MotionState::MovingUp;
         self.apply_drive_mode(DriveMode::UpBoost);
