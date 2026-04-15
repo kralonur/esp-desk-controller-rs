@@ -799,6 +799,11 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         }
 
         let shared_target = target_position.clamp(status.min_position, status.max_position);
+        if (shared_target - status.average_position).abs() <= DESK_TARGET_TOLERANCE {
+            self.stop();
+            return Ok(self);
+        }
+
         let Some(direction) = TravelDirection::from_target(shared_target, status.average_position)
         else {
             self.stop();
