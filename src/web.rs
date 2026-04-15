@@ -1,81 +1,152 @@
 use alloc::{format, string::String};
 
 use embassy_net::Stack;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
+use picoserve::io::Read;
+use picoserve::request::Request;
+use picoserve::response::{IntoResponse, ResponseWriter};
 use picoserve::{
     AppBuilder, AppRouter, ResponseSent, Router, routing,
     routing::{RequestHandlerService, parse_path_segment},
 };
 
-use picoserve::io::Read;
-use picoserve::request::Request;
-use picoserve::response::{IntoResponse, ResponseWriter};
-
-#[derive(Clone, Copy)]
-pub enum DeskCommand {
-    Home,
-    MoveTo(i32),
-    MoveBy(i32),
-}
-
-pub struct DeskControllerState {
-    commands: Channel<CriticalSectionRawMutex, DeskCommand, 1>,
-}
-
-impl DeskControllerState {
-    pub const fn new() -> Self {
-        Self {
-            commands: Channel::new(),
-        }
-    }
-
-    pub fn try_queue(&self, command: DeskCommand) -> bool {
-        self.commands.try_send(command).is_ok()
-    }
-
-    pub async fn next_command(&self) -> DeskCommand {
-        self.commands.receive().await
-    }
-}
+use crate::controller::{
+    CommandSubmission, DeskControllerMode, DeskControllerSnapshot, DeskControllerState, DeskFault,
+    StopSubmission,
+};
+use crate::desk::DeskMotionState;
 
 async fn index() -> &'static str {
-    "Endpoints: POST /home, /up/<steps>, /down/<steps>, /move/<position>\n"
+    "Endpoints: GET /status, POST /home, /stop, /up/<steps>, /down/<steps>, /move/<position>\n"
 }
 
-fn home_response(state: &DeskControllerState) -> &'static str {
-    if state.try_queue(DeskCommand::Home) {
-        "home command queued\n"
-    } else {
-        "home command queue is full\n"
+fn home_response(state: &DeskControllerState) -> String {
+    submission_response("home", state.submit_home(), state.snapshot())
+}
+
+fn stop_response(state: &DeskControllerState) -> String {
+    match state.submit_stop() {
+        StopSubmission::Accepted => response_body("stop", "accepted", state.snapshot()),
+        StopSubmission::IgnoredIdle => response_body("stop", "ignored_idle", state.snapshot()),
     }
 }
 
 fn up_response(state: &DeskControllerState, steps: i32) -> String {
-    if state.try_queue(DeskCommand::MoveBy(steps.abs())) {
-        format!("up command queued by {}\n", steps.abs())
-    } else {
-        String::from("command queue is full\n")
-    }
+    let steps = steps.abs();
+    submission_response("up", state.submit_move_by(steps), state.snapshot())
 }
 
 fn down_response(state: &DeskControllerState, steps: i32) -> String {
-    if state.try_queue(DeskCommand::MoveBy(-steps.abs())) {
-        format!("down command queued by {}\n", steps.abs())
-    } else {
-        String::from("command queue is full\n")
-    }
+    let steps = steps.abs();
+    submission_response("down", state.submit_move_by(-steps), state.snapshot())
 }
 
 fn move_to_response(state: &DeskControllerState, position: i32) -> String {
-    if state.try_queue(DeskCommand::MoveTo(position)) {
-        format!("move command queued to {}\n", position)
-    } else {
-        String::from("command queue is full\n")
+    submission_response("move", state.submit_move_to(position), state.snapshot())
+}
+
+fn status_response(state: &DeskControllerState) -> String {
+    let snapshot = state.snapshot();
+    let status = state.status();
+    format!(
+        "mode={}\ncommand_pending={}\nstop_requested={}\nlast_fault={}\nhomed={}\nneeds_rehome={}\nmotion={}\ntarget_active={}\ntarget_position={}\naverage_position={}\nleft_position={}\nright_position={}\nmin_position={}\nmax_position={}\nskew_counts={}\n",
+        controller_mode_name(snapshot.mode),
+        bool_name(snapshot.command_pending),
+        bool_name(snapshot.stop_requested),
+        fault_name(snapshot.last_fault),
+        bool_name(status.homed),
+        bool_name(status.needs_rehome),
+        motion_name(status.motion),
+        bool_name(status.target_active),
+        status.target_position,
+        status.average_position,
+        status.left_position,
+        status.right_position,
+        status.min_position,
+        status.max_position,
+        status.skew_counts,
+    )
+}
+
+fn submission_response(
+    command: &'static str,
+    submission: CommandSubmission,
+    snapshot: DeskControllerSnapshot,
+) -> String {
+    let result = match submission {
+        CommandSubmission::Accepted => "accepted",
+        CommandSubmission::RejectedBusy => "rejected_busy",
+        CommandSubmission::RejectedUnhomed => "rejected_unhomed",
+        CommandSubmission::RejectedFaulted => "rejected_faulted",
+    };
+
+    response_body(command, result, snapshot)
+}
+
+fn response_body(
+    command: &'static str,
+    result: &'static str,
+    snapshot: DeskControllerSnapshot,
+) -> String {
+    format!(
+        "command={}\nresult={}\nmode={}\ncommand_pending={}\nstop_requested={}\nlast_fault={}\n",
+        command,
+        result,
+        controller_mode_name(snapshot.mode),
+        bool_name(snapshot.command_pending),
+        bool_name(snapshot.stop_requested),
+        fault_name(snapshot.last_fault),
+    )
+}
+
+fn controller_mode_name(mode: DeskControllerMode) -> &'static str {
+    match mode {
+        DeskControllerMode::Unhomed => "unhomed",
+        DeskControllerMode::Ready => "ready",
+        DeskControllerMode::Homing => "homing",
+        DeskControllerMode::Moving => "moving",
+        DeskControllerMode::Faulted => "faulted",
     }
+}
+
+fn fault_name(fault: Option<DeskFault>) -> &'static str {
+    match fault {
+        None => "none",
+        Some(DeskFault::LeftLeg(error)) => match error {
+            crate::leg::LegError::HomingStartTimeout => "left_leg_homing_start_timeout",
+            crate::leg::LegError::PolarityMismatch => "left_leg_polarity_mismatch",
+            crate::leg::LegError::MoveTimeout => "left_leg_move_timeout",
+        },
+        Some(DeskFault::RightLeg(error)) => match error {
+            crate::leg::LegError::HomingStartTimeout => "right_leg_homing_start_timeout",
+            crate::leg::LegError::PolarityMismatch => "right_leg_polarity_mismatch",
+            crate::leg::LegError::MoveTimeout => "right_leg_move_timeout",
+        },
+        Some(DeskFault::MoveTimeout) => "move_timeout",
+        Some(DeskFault::SkewFault) => "skew_fault",
+        Some(DeskFault::RehomeRequired) => "rehome_required",
+    }
+}
+
+fn motion_name(motion: DeskMotionState) -> &'static str {
+    match motion {
+        DeskMotionState::Idle => "idle",
+        DeskMotionState::Homing => "homing",
+        DeskMotionState::MovingUp => "moving_up",
+        DeskMotionState::MovingDown => "moving_down",
+    }
+}
+
+fn bool_name(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
 }
 
 #[derive(Clone, Copy)]
 struct HomeService {
+    state: &'static DeskControllerState,
+}
+
+#[derive(Clone, Copy)]
+struct StopService {
     state: &'static DeskControllerState,
 }
 
@@ -94,6 +165,11 @@ struct MoveToService {
     state: &'static DeskControllerState,
 }
 
+#[derive(Clone, Copy)]
+struct StatusService {
+    state: &'static DeskControllerState,
+}
+
 impl RequestHandlerService<(), ()> for HomeService {
     async fn call_request_handler_service<R: Read, W: ResponseWriter<Error = R::Error>>(
         &self,
@@ -103,6 +179,20 @@ impl RequestHandlerService<(), ()> for HomeService {
         response_writer: W,
     ) -> Result<ResponseSent, W::Error> {
         home_response(self.state)
+            .write_to(request.body_connection.finalize().await?, response_writer)
+            .await
+    }
+}
+
+impl RequestHandlerService<(), ()> for StopService {
+    async fn call_request_handler_service<R: Read, W: ResponseWriter<Error = R::Error>>(
+        &self,
+        _state: &(),
+        (): (),
+        request: Request<'_, R>,
+        response_writer: W,
+    ) -> Result<ResponseSent, W::Error> {
+        stop_response(self.state)
             .write_to(request.body_connection.finalize().await?, response_writer)
             .await
     }
@@ -150,6 +240,20 @@ impl RequestHandlerService<(), (i32,)> for MoveToService {
     }
 }
 
+impl RequestHandlerService<(), ()> for StatusService {
+    async fn call_request_handler_service<R: Read, W: ResponseWriter<Error = R::Error>>(
+        &self,
+        _state: &(),
+        (): (),
+        request: Request<'_, R>,
+        response_writer: W,
+    ) -> Result<ResponseSent, W::Error> {
+        status_response(self.state)
+            .write_to(request.body_connection.finalize().await?, response_writer)
+            .await
+    }
+}
+
 pub struct Application {
     state: &'static DeskControllerState,
 }
@@ -161,8 +265,16 @@ impl AppBuilder for Application {
         Router::new()
             .route("/", routing::get(index))
             .route(
+                "/status",
+                routing::get_service(StatusService { state: self.state }),
+            )
+            .route(
                 "/home",
                 routing::post_service(HomeService { state: self.state }),
+            )
+            .route(
+                "/stop",
+                routing::post_service(StopService { state: self.state }),
             )
             .route(
                 ("/up", parse_path_segment::<i32>()),
@@ -202,7 +314,6 @@ pub async fn web_task(
 pub struct WebApp {
     pub router: &'static Router<<Application as AppBuilder>::PathRouter>,
     pub config: &'static picoserve::Config,
-    pub state: &'static DeskControllerState,
 }
 
 impl WebApp {
@@ -214,10 +325,6 @@ impl WebApp {
             picoserve::Config::new(Default::default()).keep_connection_alive()
         );
 
-        Self {
-            router,
-            config,
-            state,
-        }
+        Self { router, config }
     }
 }

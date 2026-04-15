@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+pub mod controller;
 pub mod desk;
 pub mod leg;
 pub mod motor;

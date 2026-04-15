@@ -69,6 +69,7 @@ pub enum DeskError {
     MoveTimeout,
     SkewFault,
     RehomeRequired,
+    Stopped,
 }
 
 pub struct UnhomedDesk;
@@ -80,6 +81,11 @@ pub struct DeskStatusStorage {
 
 pub struct DeskStatusWatcher {
     receiver: Receiver<'static, CriticalSectionRawMutex, DeskStatus, 4>,
+}
+
+#[derive(Clone, Copy)]
+pub struct DeskStatusReader {
+    status_state: &'static DeskStatusState,
 }
 
 struct DeskStatusState {
@@ -175,6 +181,12 @@ impl DeskStatusStorage {
 impl DeskStatusWatcher {
     pub async fn wait_for_change(&mut self) -> DeskStatus {
         self.receiver.changed().await
+    }
+}
+
+impl DeskStatusReader {
+    pub fn current(&self) -> DeskStatus {
+        self.status_state.current()
     }
 }
 
@@ -337,6 +349,12 @@ impl<
         DeskStatusWatcher { receiver }
     }
 
+    pub fn status_reader(&self) -> DeskStatusReader {
+        DeskStatusReader {
+            status_state: self.status_state,
+        }
+    }
+
     fn update_status(&self, update_fn: impl FnOnce(&mut DeskStatus)) -> DeskStatus {
         self.status_state.update(update_fn)
     }
@@ -424,15 +442,19 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         (self, error)
     }
 
-    pub async fn home_all(
+    pub async fn home_all<StopRequested>(
         mut self,
+        stop_requested: StopRequested,
     ) -> Result<
         Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
         (
             Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
             DeskError,
         ),
-    > {
+    >
+    where
+        StopRequested: Fn() -> bool,
+    {
         self.stop_ready_legs();
         self.update_status(|status| {
             status.motion = DeskMotionState::Homing;
@@ -471,6 +493,12 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         let mut right_started = false;
 
         loop {
+            if stop_requested() {
+                left_leg.apply_drive_mode(DriveMode::Stop);
+                right_leg.apply_drive_mode(DriveMode::Stop);
+                return Err(self.restore_unhomed(left_leg, right_leg, DeskError::Stopped));
+            }
+
             if !left_started {
                 let current_position = left_leg.encoder_position();
                 if progressed_in_direction(left_start, current_position, left_direction) {
@@ -532,6 +560,12 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         let mut homing_sync_phase = SyncPhase::Balanced;
 
         while !left_stalled || !right_stalled {
+            if stop_requested() {
+                left_leg.apply_drive_mode(DriveMode::Stop);
+                right_leg.apply_drive_mode(DriveMode::Stop);
+                return Err(self.restore_unhomed(left_leg, right_leg, DeskError::Stopped));
+            }
+
             Timer::after(HOMING_POLL_INTERVAL).await;
 
             if !left_stalled {
@@ -607,6 +641,12 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         right_leg.apply_drive_mode(DriveMode::UpBoost);
 
         while !left_backoff_done || !right_backoff_done {
+            if stop_requested() {
+                left_leg.apply_drive_mode(DriveMode::Stop);
+                right_leg.apply_drive_mode(DriveMode::Stop);
+                return Err(self.restore_unhomed(left_leg, right_leg, DeskError::Stopped));
+            }
+
             Timer::after(HOMING_POLL_INTERVAL).await;
 
             if !left_backoff_done {
@@ -715,16 +755,20 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
 impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm: PwmPeripheral>
     Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>
 {
-    pub async fn home_all(
+    pub async fn home_all<StopRequested>(
         self,
+        stop_requested: StopRequested,
     ) -> Result<
         Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
         (
             Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
             DeskError,
         ),
-    > {
-        self.into_unhomed().home_all().await
+    >
+    where
+        StopRequested: Fn() -> bool,
+    {
+        self.into_unhomed().home_all(stop_requested).await
     }
 
     fn ready_legs_mut(&mut self) -> ReadyLegPair<'_, 'a, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm> {
@@ -783,19 +827,28 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         });
     }
 
-    pub async fn move_to(
+    pub async fn move_to<StopRequested>(
         mut self,
         target_position: i32,
+        stop_requested: StopRequested,
     ) -> Result<
         Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
         (
             Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
             DeskError,
         ),
-    > {
+    >
+    where
+        StopRequested: Fn() -> bool,
+    {
         let status = self.status();
         if !status.homed || status.needs_rehome {
             return Err(self.fail_move(DeskError::RehomeRequired));
+        }
+
+        if stop_requested() {
+            self.stop();
+            return Ok(self);
         }
 
         let shared_target = target_position.clamp(status.min_position, status.max_position);
@@ -847,6 +900,11 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         let mut sync_phase = SyncPhase::Balanced;
 
         loop {
+            if stop_requested() {
+                self.stop();
+                return Ok(self);
+            }
+
             match with_deadline(
                 Instant::now() + DESK_MOVE_TIMEOUT,
                 select(

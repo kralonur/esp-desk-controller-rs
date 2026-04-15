@@ -18,11 +18,11 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 use esp_pwm_motor::{
+    controller::{DeskCommand, DeskControllerState},
     desk::{Desk, DeskStatusStorage, ReadyDesk, UnhomedDesk},
     leg::{DriveSide, LegConfig, LegStatusStorage},
     motor::Motor,
     quadrature::{Quadrature, QuadratureDirection, QuadratureStorage},
-    web::{DeskCommand, DeskControllerState},
 };
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _};
@@ -31,7 +31,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 const PWM_PERIOD_TICKS: u16 = 99;
 const PWM_FREQUENCY_KHZ: u32 = 20;
-static DESK_CONTROL_STATE: DeskControllerState = DeskControllerState::new();
 
 fn clamp_relative_target(
     current_position: i32,
@@ -68,56 +67,105 @@ async fn run_desk_control<
     loop {
         match control_state.next_command().await {
             DeskCommand::Home => {
+                if control_state.stop_requested() {
+                    control_state.clear_stop_request();
+                    info!("home command cancelled before start");
+                    continue;
+                }
+
                 info!("received /home command");
+                control_state.begin_homing();
 
                 desk = match desk {
-                    DeskRuntime::Unhomed(desk) => match desk.home_all().await {
-                        Ok(desk) => {
-                            info!("desk homed");
-                            DeskRuntime::Ready(desk)
+                    DeskRuntime::Unhomed(desk) => {
+                        match desk.home_all(|| control_state.stop_requested()).await {
+                            Ok(desk) => {
+                                info!("desk homed");
+                                control_state.finish_ready();
+                                DeskRuntime::Ready(desk)
+                            }
+                            Err((desk, esp_pwm_motor::desk::DeskError::Stopped)) => {
+                                info!("desk homing stopped");
+                                control_state.finish_unhomed();
+                                DeskRuntime::Unhomed(desk)
+                            }
+                            Err((desk, error)) => {
+                                warn!("desk homing failed: {:?}", error);
+                                control_state.fault(error);
+                                DeskRuntime::Unhomed(desk)
+                            }
                         }
-                        Err((desk, error)) => {
-                            warn!("desk homing failed: {:?}", error);
-                            DeskRuntime::Unhomed(desk)
+                    }
+                    DeskRuntime::Ready(desk) => {
+                        match desk.home_all(|| control_state.stop_requested()).await {
+                            Ok(desk) => {
+                                info!("desk re-homed");
+                                control_state.finish_ready();
+                                DeskRuntime::Ready(desk)
+                            }
+                            Err((desk, esp_pwm_motor::desk::DeskError::Stopped)) => {
+                                info!("desk re-home stopped");
+                                control_state.finish_unhomed();
+                                DeskRuntime::Unhomed(desk)
+                            }
+                            Err((desk, error)) => {
+                                warn!("desk re-home failed: {:?}", error);
+                                control_state.fault(error);
+                                DeskRuntime::Unhomed(desk)
+                            }
                         }
-                    },
-                    DeskRuntime::Ready(desk) => match desk.home_all().await {
-                        Ok(desk) => {
-                            info!("desk re-homed");
-                            DeskRuntime::Ready(desk)
-                        }
-                        Err((desk, error)) => {
-                            warn!("desk re-home failed: {:?}", error);
-                            DeskRuntime::Unhomed(desk)
-                        }
-                    },
+                    }
                 };
             }
             DeskCommand::MoveTo(target_position) => {
+                if control_state.stop_requested() {
+                    control_state.clear_stop_request();
+                    info!("move_to command cancelled before start");
+                    continue;
+                }
+
                 desk = match desk {
                     DeskRuntime::Unhomed(desk) => {
                         warn!("move_to ignored while desk is unhomed");
-                        DeskRuntime::Unhomed(desk)
-                    }
-                    DeskRuntime::Ready(desk) => match desk.move_to(target_position).await {
-                        Ok(desk) => {
-                            info!("desk moved to {}", target_position);
-                            DeskRuntime::Ready(desk)
-                        }
-                        Err((desk, error)) => {
-                            warn!("move to {} failed: {:?}", target_position, error);
-                            DeskRuntime::Unhomed(desk)
-                        }
-                    },
-                };
-            }
-            DeskCommand::MoveBy(delta) => {
-                desk = match desk {
-                    DeskRuntime::Unhomed(desk) => {
-                        warn!("relative move ignored while desk is unhomed");
+                        control_state.finish_unhomed();
                         DeskRuntime::Unhomed(desk)
                     }
                     DeskRuntime::Ready(desk) => {
+                        control_state.begin_move();
+                        match desk
+                            .move_to(target_position, || control_state.stop_requested())
+                            .await
+                        {
+                            Ok(desk) => {
+                                let position = desk.status().average_position;
+                                info!("move_to command finished at {}", position);
+                                control_state.finish_ready();
+                                DeskRuntime::Ready(desk)
+                            }
+                            Err((desk, error)) => {
+                                warn!("move to {} failed: {:?}", target_position, error);
+                                control_state.fault(error);
+                                DeskRuntime::Unhomed(desk)
+                            }
+                        }
+                    }
+                };
+            }
+            DeskCommand::MoveBy(delta) => {
+                if control_state.stop_requested() {
+                    control_state.clear_stop_request();
+                    info!("move_by command cancelled before start");
+                    continue;
+                }
+
+                desk = match desk {
+                    DeskRuntime::Unhomed(desk) => {
+                        warn!("relative move ignored while desk is unhomed");
+                        control_state.finish_unhomed();
+                        DeskRuntime::Unhomed(desk)
+                    }
+                    DeskRuntime::Ready(desk) => {
+                        control_state.begin_move();
                         let status = desk.status();
                         let target_position = clamp_relative_target(
                             status.average_position,
@@ -128,15 +176,22 @@ async fn run_desk_control<
 
                         if target_position == status.average_position {
                             info!("relative move {} ignored at desk limit", delta);
+                            control_state.finish_ready();
                             DeskRuntime::Ready(desk)
                         } else {
-                            match desk.move_to(target_position).await {
+                            match desk
+                                .move_to(target_position, || control_state.stop_requested())
+                                .await
+                            {
                                 Ok(desk) => {
-                                    info!("desk moved by {} to {}", delta, target_position);
+                                    let position = desk.status().average_position;
+                                    info!("move_by command finished at {}", position);
+                                    control_state.finish_ready();
                                     DeskRuntime::Ready(desk)
                                 }
                                 Err((desk, error)) => {
                                     warn!("move by {} failed: {:?}", delta, error);
+                                    control_state.fault(error);
                                     DeskRuntime::Unhomed(desk)
                                 }
                             }
@@ -159,6 +214,7 @@ async fn main(spawner: Spawner) -> ! {
     static LEG1_STATUS_STORAGE: LegStatusStorage = LegStatusStorage::new();
     static LEG2_STATUS_STORAGE: LegStatusStorage = LegStatusStorage::new();
     static DESK_STATUS_STORAGE: DeskStatusStorage = DeskStatusStorage::new();
+    static DESK_CONTROL_STATE_STORAGE: StaticCell<DeskControllerState> = StaticCell::new();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
@@ -277,8 +333,11 @@ async fn main(spawner: Spawner) -> ! {
         desk_right_status_watcher,
         &spawner,
     );
+    let control_state = DESK_CONTROL_STATE_STORAGE
+        .uninit()
+        .write(DeskControllerState::new(desk.status_reader()));
 
-    let web_app = esp_pwm_motor::web::WebApp::new(&DESK_CONTROL_STATE);
+    let web_app = esp_pwm_motor::web::WebApp::new(control_state);
     for id in 0..esp_pwm_motor::web::WEB_TASK_POOL_SIZE {
         spawner.must_spawn(esp_pwm_motor::web::web_task(
             id,
@@ -288,5 +347,5 @@ async fn main(spawner: Spawner) -> ! {
         ));
     }
 
-    run_desk_control(&DESK_CONTROL_STATE, DeskRuntime::Unhomed(desk)).await
+    run_desk_control(control_state, DeskRuntime::Unhomed(desk)).await
 }
