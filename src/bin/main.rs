@@ -31,6 +31,18 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 const PWM_PERIOD_TICKS: u16 = 99;
 const PWM_FREQUENCY_KHZ: u32 = 20;
+static DESK_CONTROL_STATE: DeskControllerState = DeskControllerState::new();
+
+fn clamp_relative_target(
+    current_position: i32,
+    min_position: i32,
+    max_position: i32,
+    delta: i32,
+) -> i32 {
+    current_position
+        .saturating_add(delta)
+        .clamp(min_position, max_position)
+}
 
 enum DeskRuntime<
     'a,
@@ -97,6 +109,39 @@ async fn run_desk_control<
                             DeskRuntime::Unhomed(desk)
                         }
                     },
+                };
+            }
+            DeskCommand::MoveBy(delta) => {
+                desk = match desk {
+                    DeskRuntime::Unhomed(desk) => {
+                        warn!("relative move ignored while desk is unhomed");
+                        DeskRuntime::Unhomed(desk)
+                    }
+                    DeskRuntime::Ready(desk) => {
+                        let status = desk.status();
+                        let target_position = clamp_relative_target(
+                            status.average_position,
+                            status.min_position,
+                            status.max_position,
+                            delta,
+                        );
+
+                        if target_position == status.average_position {
+                            info!("relative move {} ignored at desk limit", delta);
+                            DeskRuntime::Ready(desk)
+                        } else {
+                            match desk.move_to(target_position).await {
+                                Ok(desk) => {
+                                    info!("desk moved by {} to {}", delta, target_position);
+                                    DeskRuntime::Ready(desk)
+                                }
+                                Err((desk, error)) => {
+                                    warn!("move by {} failed: {:?}", delta, error);
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                            }
+                        }
+                    }
                 };
             }
         }
@@ -233,12 +278,7 @@ async fn main(spawner: Spawner) -> ! {
         &spawner,
     );
 
-    static DESK_CONTROL_STATE: StaticCell<DeskControllerState> = StaticCell::new();
-    let control_state = DESK_CONTROL_STATE
-        .uninit()
-        .write(DeskControllerState::new(desk.status_reader()));
-
-    let web_app = esp_pwm_motor::web::WebApp::new(control_state);
+    let web_app = esp_pwm_motor::web::WebApp::new(&DESK_CONTROL_STATE);
     for id in 0..esp_pwm_motor::web::WEB_TASK_POOL_SIZE {
         spawner.must_spawn(esp_pwm_motor::web::web_task(
             id,
@@ -248,5 +288,5 @@ async fn main(spawner: Spawner) -> ! {
         ));
     }
 
-    run_desk_control(control_state, DeskRuntime::Unhomed(desk)).await
+    run_desk_control(&DESK_CONTROL_STATE, DeskRuntime::Unhomed(desk)).await
 }

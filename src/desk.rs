@@ -82,11 +82,6 @@ pub struct DeskStatusWatcher {
     receiver: Receiver<'static, CriticalSectionRawMutex, DeskStatus, 4>,
 }
 
-#[derive(Clone, Copy)]
-pub struct DeskStatusReader {
-    status_state: &'static DeskStatusState,
-}
-
 struct DeskStatusState {
     status: Mutex<CriticalSectionRawMutex, RefCell<DeskStatus>>,
     watch: Watch<CriticalSectionRawMutex, DeskStatus, 4>,
@@ -180,12 +175,6 @@ impl DeskStatusStorage {
 impl DeskStatusWatcher {
     pub async fn wait_for_change(&mut self) -> DeskStatus {
         self.receiver.changed().await
-    }
-}
-
-impl DeskStatusReader {
-    pub fn current(&self) -> DeskStatus {
-        self.status_state.current()
     }
 }
 
@@ -346,12 +335,6 @@ impl<
             .expect("desk status watch receiver limit reached");
 
         DeskStatusWatcher { receiver }
-    }
-
-    pub fn status_reader(&self) -> DeskStatusReader {
-        DeskStatusReader {
-            status_state: self.status_state,
-        }
     }
 
     fn update_status(&self, update_fn: impl FnOnce(&mut DeskStatus)) -> DeskStatus {

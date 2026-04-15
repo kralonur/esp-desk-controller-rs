@@ -11,24 +11,21 @@ use picoserve::io::Read;
 use picoserve::request::Request;
 use picoserve::response::{IntoResponse, ResponseWriter};
 
-use crate::desk::DeskStatusReader;
-
 #[derive(Clone, Copy)]
 pub enum DeskCommand {
     Home,
     MoveTo(i32),
+    MoveBy(i32),
 }
 
 pub struct DeskControllerState {
     commands: Channel<CriticalSectionRawMutex, DeskCommand, 1>,
-    status: DeskStatusReader,
 }
 
 impl DeskControllerState {
-    pub fn new(status: DeskStatusReader) -> Self {
+    pub const fn new() -> Self {
         Self {
             commands: Channel::new(),
-            status,
         }
     }
 
@@ -39,47 +36,10 @@ impl DeskControllerState {
     pub async fn next_command(&self) -> DeskCommand {
         self.commands.receive().await
     }
-
-    pub fn current_status(&self) -> crate::desk::DeskStatus {
-        self.status.current()
-    }
 }
 
 async fn index() -> &'static str {
     "Endpoints: POST /home, /up/<steps>, /down/<steps>, /move/<position>\n"
-}
-
-fn queue_relative_move(
-    state: &DeskControllerState,
-    delta: i32,
-    direction_name: &str,
-    limit_name: &str,
-) -> String {
-    let status = state.current_status();
-
-    if !status.homed || status.needs_rehome {
-        return String::from("desk is not homed\n");
-    }
-
-    let requested_target = status.average_position.saturating_add(delta);
-    let clamped_target = requested_target.clamp(status.min_position, status.max_position);
-
-    if clamped_target == status.average_position {
-        return format!("already at {} limit\n", limit_name);
-    }
-
-    if !state.try_queue(DeskCommand::MoveTo(clamped_target)) {
-        return String::from("command queue is full\n");
-    }
-
-    if clamped_target != requested_target {
-        return format!(
-            "{} command queued, clamped to {}\n",
-            direction_name, clamped_target
-        );
-    }
-
-    format!("{} command queued to {}\n", direction_name, clamped_target)
 }
 
 fn home_response(state: &DeskControllerState) -> &'static str {
@@ -91,34 +51,26 @@ fn home_response(state: &DeskControllerState) -> &'static str {
 }
 
 fn up_response(state: &DeskControllerState, steps: i32) -> String {
-    queue_relative_move(state, steps.abs(), "up", "upper")
+    if state.try_queue(DeskCommand::MoveBy(steps.abs())) {
+        format!("up command queued by {}\n", steps.abs())
+    } else {
+        String::from("command queue is full\n")
+    }
 }
 
 fn down_response(state: &DeskControllerState, steps: i32) -> String {
-    queue_relative_move(state, -steps.abs(), "down", "lower")
+    if state.try_queue(DeskCommand::MoveBy(-steps.abs())) {
+        format!("down command queued by {}\n", steps.abs())
+    } else {
+        String::from("command queue is full\n")
+    }
 }
 
 fn move_to_response(state: &DeskControllerState, position: i32) -> String {
-    let status = state.current_status();
-
-    if !status.homed || status.needs_rehome {
-        return String::from("desk is not homed\n");
-    }
-
-    let clamped_position = position.clamp(status.min_position, status.max_position);
-
-    if clamped_position == status.average_position {
-        return String::from("already at requested limit/position\n");
-    }
-
-    if !state.try_queue(DeskCommand::MoveTo(clamped_position)) {
-        return String::from("command queue is full\n");
-    }
-
-    if clamped_position != position {
-        format!("move command queued, clamped to {}\n", clamped_position)
+    if state.try_queue(DeskCommand::MoveTo(position)) {
+        format!("move command queued to {}\n", position)
     } else {
-        format!("move command queued to {}\n", clamped_position)
+        String::from("command queue is full\n")
     }
 }
 
