@@ -82,6 +82,11 @@ pub struct DeskStatusWatcher {
     receiver: Receiver<'static, CriticalSectionRawMutex, DeskStatus, 4>,
 }
 
+#[derive(Clone, Copy)]
+pub struct DeskStatusReader {
+    status_state: &'static DeskStatusState,
+}
+
 struct DeskStatusState {
     status: Mutex<CriticalSectionRawMutex, RefCell<DeskStatus>>,
     watch: Watch<CriticalSectionRawMutex, DeskStatus, 4>,
@@ -175,6 +180,12 @@ impl DeskStatusStorage {
 impl DeskStatusWatcher {
     pub async fn wait_for_change(&mut self) -> DeskStatus {
         self.receiver.changed().await
+    }
+}
+
+impl DeskStatusReader {
+    pub fn current(&self) -> DeskStatus {
+        self.status_state.current()
     }
 }
 
@@ -315,13 +326,13 @@ async fn mirror_leg_to_desk_status(
 }
 
 impl<
-        'a,
-        State,
-        const LEFT_OP: u8,
-        LeftPwm: PwmPeripheral,
-        const RIGHT_OP: u8,
-        RightPwm: PwmPeripheral,
-    > Desk<'a, State, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>
+    'a,
+    State,
+    const LEFT_OP: u8,
+    LeftPwm: PwmPeripheral,
+    const RIGHT_OP: u8,
+    RightPwm: PwmPeripheral,
+> Desk<'a, State, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>
 {
     pub fn status(&self) -> DeskStatus {
         self.status_state.current()
@@ -335,6 +346,12 @@ impl<
             .expect("desk status watch receiver limit reached");
 
         DeskStatusWatcher { receiver }
+    }
+
+    pub fn status_reader(&self) -> DeskStatusReader {
+        DeskStatusReader {
+            status_state: self.status_state,
+        }
     }
 
     fn update_status(&self, update_fn: impl FnOnce(&mut DeskStatus)) -> DeskStatus {
@@ -428,7 +445,10 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         mut self,
     ) -> Result<
         Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
-        (Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>, DeskError),
+        (
+            Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
+            DeskError,
+        ),
     > {
         self.stop_ready_legs();
         self.update_status(|status| {
@@ -712,9 +732,19 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
 impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm: PwmPeripheral>
     Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>
 {
-    fn ready_legs_mut(
-        &mut self,
-    ) -> ReadyLegPair<'_, 'a, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm> {
+    pub async fn home_all(
+        self,
+    ) -> Result<
+        Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
+        (
+            Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
+            DeskError,
+        ),
+    > {
+        self.into_unhomed().home_all().await
+    }
+
+    fn ready_legs_mut(&mut self) -> ReadyLegPair<'_, 'a, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm> {
         match (&mut self.left, &mut self.right) {
             (Some(ManagedLeg::Ready(left)), Some(ManagedLeg::Ready(right))) => (left, right),
             _ => unreachable!("ready desk must contain ready legs"),
@@ -752,7 +782,13 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         }
     }
 
-    fn fail_move(self, error: DeskError) -> (Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>, DeskError) {
+    fn fail_move(
+        self,
+        error: DeskError,
+    ) -> (
+        Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
+        DeskError,
+    ) {
         (self.into_unhomed(), error)
     }
 
@@ -769,7 +805,10 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         target_position: i32,
     ) -> Result<
         Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
-        (Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>, DeskError),
+        (
+            Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
+            DeskError,
+        ),
     > {
         let status = self.status();
         if !status.homed || status.needs_rehome {
@@ -777,8 +816,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         }
 
         let shared_target = target_position.clamp(status.min_position, status.max_position);
-        let Some(direction) =
-            TravelDirection::from_target(shared_target, status.average_position)
+        let Some(direction) = TravelDirection::from_target(shared_target, status.average_position)
         else {
             self.stop();
             return Ok(self);
@@ -956,14 +994,22 @@ fn plan_move_leg(
         return LegPlan::Stop;
     }
 
-    let duty = clamp_drive_duty(axis.base_duty, sync_trim(phase, is_leader, MOVE_SYNC_DUTY_STEP));
+    let duty = clamp_drive_duty(
+        axis.base_duty,
+        sync_trim(phase, is_leader, MOVE_SYNC_DUTY_STEP),
+    );
     match direction {
         TravelDirection::Up => LegPlan::Up(duty),
         TravelDirection::Down => LegPlan::Down(duty),
     }
 }
 
-fn plan_move(direction: TravelDirection, phase: SyncPhase, lead_left: bool, snapshot: MoveSnapshot) -> DualLegPlan {
+fn plan_move(
+    direction: TravelDirection,
+    phase: SyncPhase,
+    lead_left: bool,
+    snapshot: MoveSnapshot,
+) -> DualLegPlan {
     DualLegPlan {
         left: plan_move_leg(direction, snapshot.left, phase, lead_left),
         right: plan_move_leg(direction, snapshot.right, phase, !lead_left),
@@ -1006,7 +1052,14 @@ fn apply_leg_plan<State, const OP: u8, PWM: PwmPeripheral>(
     }
 }
 
-fn apply_dual_plan<LeftState, RightState, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm: PwmPeripheral>(
+fn apply_dual_plan<
+    LeftState,
+    RightState,
+    const LEFT_OP: u8,
+    LeftPwm: PwmPeripheral,
+    const RIGHT_OP: u8,
+    RightPwm: PwmPeripheral,
+>(
     left_leg: &mut Leg<'_, LeftState, LEFT_OP, LeftPwm>,
     right_leg: &mut Leg<'_, RightState, RIGHT_OP, RightPwm>,
     plan: DualLegPlan,

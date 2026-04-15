@@ -12,44 +12,94 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::{
     clock::CpuClock,
-    mcpwm::{McPwm, PeripheralClockConfig},
+    mcpwm::{McPwm, PeripheralClockConfig, PwmPeripheral},
+    rng::Rng,
     time::Rate,
     timer::timg::TimerGroup,
 };
 use esp_pwm_motor::{
-    desk::{Desk, DeskStatusStorage, DeskStatusWatcher},
+    desk::{Desk, DeskStatusStorage, ReadyDesk, UnhomedDesk},
     leg::{DriveSide, LegConfig, LegStatusStorage},
     motor::Motor,
     quadrature::{Quadrature, QuadratureDirection, QuadratureStorage},
+    web::{DeskCommand, DeskControllerState},
 };
+use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _};
 
-// This creates a default app-descriptor required by the esp-idf bootloader.
-// For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
 const PWM_PERIOD_TICKS: u16 = 99;
 const PWM_FREQUENCY_KHZ: u32 = 20;
-const RUN_MOVE_TEST_SEQUENCE: bool = true;
 
-#[embassy_executor::task]
-async fn watch_desk_status(mut watcher: DeskStatusWatcher) {
+enum DeskRuntime<
+    'a,
+    const LEFT_OP: u8,
+    LeftPwm: PwmPeripheral,
+    const RIGHT_OP: u8,
+    RightPwm: PwmPeripheral,
+> {
+    Unhomed(Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>),
+    Ready(Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>),
+}
+
+async fn run_desk_control<
+    'a,
+    const LEFT_OP: u8,
+    LeftPwm: PwmPeripheral,
+    const RIGHT_OP: u8,
+    RightPwm: PwmPeripheral,
+>(
+    control_state: &'static DeskControllerState,
+    mut desk: DeskRuntime<'a, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
+) -> ! {
     loop {
-        let status = watcher.wait_for_change().await;
-        info!(
-            "desk homed={=bool} rehome={=bool} motion={:?} target_active={=bool} target={=i32} left={=i32} right={=i32} avg={=i32} skew={=i32} min={=i32} max={=i32}",
-            status.homed,
-            status.needs_rehome,
-            status.motion,
-            status.target_active,
-            status.target_position,
-            status.left_position,
-            status.right_position,
-            status.average_position,
-            status.skew_counts,
-            status.min_position,
-            status.max_position,
-        );
+        match control_state.next_command().await {
+            DeskCommand::Home => {
+                info!("received /home command");
+
+                desk = match desk {
+                    DeskRuntime::Unhomed(desk) => match desk.home_all().await {
+                        Ok(desk) => {
+                            info!("desk homed");
+                            DeskRuntime::Ready(desk)
+                        }
+                        Err((desk, error)) => {
+                            warn!("desk homing failed: {:?}", error);
+                            DeskRuntime::Unhomed(desk)
+                        }
+                    },
+                    DeskRuntime::Ready(desk) => match desk.home_all().await {
+                        Ok(desk) => {
+                            info!("desk re-homed");
+                            DeskRuntime::Ready(desk)
+                        }
+                        Err((desk, error)) => {
+                            warn!("desk re-home failed: {:?}", error);
+                            DeskRuntime::Unhomed(desk)
+                        }
+                    },
+                };
+            }
+            DeskCommand::MoveTo(target_position) => {
+                desk = match desk {
+                    DeskRuntime::Unhomed(desk) => {
+                        warn!("move_to ignored while desk is unhomed");
+                        DeskRuntime::Unhomed(desk)
+                    }
+                    DeskRuntime::Ready(desk) => match desk.move_to(target_position).await {
+                        Ok(desk) => {
+                            info!("desk moved to {}", target_position);
+                            DeskRuntime::Ready(desk)
+                        }
+                        Err((desk, error)) => {
+                            warn!("move to {} failed: {:?}", target_position, error);
+                            DeskRuntime::Unhomed(desk)
+                        }
+                    },
+                };
+            }
+        }
     }
 }
 
@@ -59,7 +109,6 @@ async fn watch_desk_status(mut watcher: DeskStatusWatcher) {
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    // generator version: 1.2.0
     static QUADRATURE1_STORAGE: QuadratureStorage = QuadratureStorage::new();
     static QUADRATURE2_STORAGE: QuadratureStorage = QuadratureStorage::new();
     static LEG1_STATUS_STORAGE: LegStatusStorage = LegStatusStorage::new();
@@ -68,6 +117,8 @@ async fn main(spawner: Spawner) -> ! {
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+
+    esp_alloc::heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 65536);
 
     let leg_1_left_enable_pin = peripherals.GPIO4;
     let leg_1_right_enable_pin = peripherals.GPIO3;
@@ -85,6 +136,22 @@ async fn main(spawner: Spawner) -> ! {
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
+
+    static RADIO_INIT: StaticCell<esp_radio::Controller<'static>> = StaticCell::new();
+    let radio_init = RADIO_INIT
+        .uninit()
+        .write(esp_radio::init().expect("Failed to initialize Wi-Fi controller"));
+    let rng = Rng::new();
+    let stack =
+        match esp_pwm_motor::wifi::start_wifi(radio_init, peripherals.WIFI, rng, &spawner).await {
+            Ok(stack) => stack,
+            Err(error) => {
+                warn!("wifi setup failed: {:?}", error);
+                loop {
+                    Timer::after(Duration::from_secs(1)).await;
+                }
+            }
+        };
 
     let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40)).unwrap();
     let mut mcpwm = McPwm::new(peripherals.MCPWM0, clock_cfg);
@@ -165,71 +232,21 @@ async fn main(spawner: Spawner) -> ! {
         desk_right_status_watcher,
         &spawner,
     );
-    let desk_status_watcher = desk.status_watcher();
-    spawner.must_spawn(watch_desk_status(desk_status_watcher));
 
-    let mut desk = match desk.home_all().await {
-        Ok(desk) => desk,
-        Err((_desk, error)) => {
-            warn!("desk homing failed: {:?}", error);
-            loop {
-                Timer::after(Duration::from_secs(1)).await;
-            }
-        }
-    };
+    static DESK_CONTROL_STATE: StaticCell<DeskControllerState> = StaticCell::new();
+    let control_state = DESK_CONTROL_STATE
+        .uninit()
+        .write(DeskControllerState::new(desk.status_reader()));
 
-    if RUN_MOVE_TEST_SEQUENCE {
-        Timer::after(Duration::from_secs(5)).await;
-        desk = match desk.move_to(500).await {
-            Ok(desk) => desk,
-            Err((_desk, error)) => {
-                warn!("move to 500 failed: {:?}", error);
-                loop {
-                    Timer::after(Duration::from_secs(1)).await;
-                }
-            }
-        };
-
-        Timer::after(Duration::from_secs(1)).await;
-
-        desk = match desk.move_to(0).await {
-            Ok(desk) => desk,
-            Err((_desk, error)) => {
-                warn!("move to 0 failed: {:?}", error);
-                loop {
-                    Timer::after(Duration::from_secs(1)).await;
-                }
-            }
-        };
-
-        for cycle in 1..=2 {
-            Timer::after(Duration::from_secs(1)).await;
-
-            desk = match desk.move_to(500).await {
-                Ok(desk) => desk,
-                Err((_desk, error)) => {
-                    warn!("cycle {} move to 500 failed: {:?}", cycle, error);
-                    loop {
-                        Timer::after(Duration::from_secs(1)).await;
-                    }
-                }
-            };
-
-            Timer::after(Duration::from_secs(1)).await;
-
-            desk = match desk.move_to(0).await {
-                Ok(desk) => desk,
-                Err((_desk, error)) => {
-                    warn!("cycle {} move to 0 failed: {:?}", cycle, error);
-                    loop {
-                        Timer::after(Duration::from_secs(1)).await;
-                    }
-                }
-            };
-        }
+    let web_app = esp_pwm_motor::web::WebApp::new(control_state);
+    for id in 0..esp_pwm_motor::web::WEB_TASK_POOL_SIZE {
+        spawner.must_spawn(esp_pwm_motor::web::web_task(
+            id,
+            stack,
+            web_app.router,
+            web_app.config,
+        ));
     }
 
-    loop {
-        Timer::after(Duration::from_secs(1)).await;
-    }
+    run_desk_control(control_state, DeskRuntime::Unhomed(desk)).await
 }
