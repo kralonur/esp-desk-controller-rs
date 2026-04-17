@@ -8,5 +8,6 @@ pub mod desk;
 pub mod leg;
 pub mod motor;
 pub mod quadrature;
+pub mod units;
 pub mod web;
 pub mod wifi;
