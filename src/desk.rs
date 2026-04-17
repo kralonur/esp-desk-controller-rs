@@ -8,40 +8,15 @@ use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     watch::{Receiver, Watch},
 };
-use embassy_time::{Duration, Instant, Timer, with_deadline};
+use embassy_time::{Instant, Timer, with_deadline};
 use esp_hal::mcpwm::PwmPeripheral;
 use static_cell::StaticCell;
 
+pub use crate::config::ObstructionSensitivity;
+use crate::config::{DeskConfig, LegRuntimeConfig, ObstructionProfileConfig, RuntimeConfigReader};
 use crate::leg::{DriveMode, Leg, LegError, LegStatus, LegStatusWatcher, Ready, Unhomed};
 use crate::quadrature::QuadratureDirection;
-
-const DESK_TARGET_TOLERANCE: i32 = 5;
-const DESK_TARGET_SLOW_ZONE: i32 = 10;
-const DESK_MOVE_TIMEOUT_MS: u64 = 1_200;
-const DESK_MOVE_TIMEOUT: Duration = Duration::from_millis(DESK_MOVE_TIMEOUT_MS);
-const OBSTRUCTION_SAMPLE_WINDOW_MS: u64 = 150;
-const OBSTRUCTION_SAMPLE_WINDOW: Duration = Duration::from_millis(OBSTRUCTION_SAMPLE_WINDOW_MS);
-const OBSTRUCTION_WARMUP_DURATION_MS: u64 = 300;
-const OBSTRUCTION_WARMUP_DURATION: Duration = Duration::from_millis(OBSTRUCTION_WARMUP_DURATION_MS);
-const OBSTRUCTION_WARMUP_COUNTS: i32 = 8;
-const MIN_MOVE_DUTY: u16 = 10;
-const MOVE_RUN_DUTY: u16 = 30;
-const MOVE_SLOW_DUTY: u16 = 15;
-const MOVE_SYNC_DUTY_STEP: i16 = 8;
-const HOMING_POLL_INTERVAL: Duration = Duration::from_millis(20);
-const HOMING_START_TIMEOUT: Duration = Duration::from_millis(800);
-const HOMING_STALL_TIMEOUT: Duration = Duration::from_millis(600);
-const HOMING_BACKOFF_STEPS: i32 = 20;
-const HOMING_RUN_DUTY: u16 = 20;
-const HOMING_SYNC_DUTY_STEP: i16 = 4;
-const SYNC_SPEEDUP_ENTER_COUNTS: i32 = 10;
-const SYNC_SPEEDUP_EXIT_COUNTS: i32 = 4;
-const CATCH_UP_ENTER_COUNTS: i32 = 30;
-const CATCH_UP_EXIT_COUNTS: i32 = 12;
-const FAULT_SKEW_COUNTS: i32 = 80;
-const HOMING_FAULT_SKEW_COUNTS: i32 = 160;
-const DEFAULT_OBSTRUCTION_SENSITIVITY: ObstructionSensitivity = ObstructionSensitivity::High;
-const _: [(); 1] = [(); (DESK_MOVE_TIMEOUT_MS > longest_obstruction_detection_time_ms()) as usize];
+use crate::units::{DutyPercent, DutyPercentTrim, PositionCounts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub enum DeskMotionState {
@@ -60,20 +35,11 @@ pub enum DeskStopReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
-pub enum ObstructionSensitivity {
-    None,
-    Low,
-    Medium,
-    High,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub struct DeskStatus {
     pub homed: bool,
     pub needs_rehome: bool,
     pub motion: DeskMotionState,
     pub last_stop_reason: DeskStopReason,
-    pub obstruction_sensitivity: ObstructionSensitivity,
     pub target_active: bool,
     pub target_position: i32,
     pub left_position: i32,
@@ -154,7 +120,7 @@ enum TravelDirection {
 struct AxisTargetState {
     at_target: bool,
     near_target: bool,
-    base_duty: u16,
+    base_duty: DutyPercent,
 }
 
 #[derive(Clone, Copy)]
@@ -165,15 +131,10 @@ struct MoveSnapshot {
     right: AxisTargetState,
 }
 
-#[derive(Clone, Copy)]
-struct ObstructionProfile {
-    minimum_baseline_percent: u32,
-    consecutive_windows: u8,
-}
-
 struct ObstructionMonitor {
+    config: DeskConfig,
     direction: TravelDirection,
-    profile: ObstructionProfile,
+    profile: ObstructionProfileConfig,
     move_started_at: Instant,
     start_left: i32,
     start_right: i32,
@@ -189,9 +150,9 @@ struct ObstructionMonitor {
 #[derive(Clone, Copy)]
 enum LegPlan {
     Stop,
-    Up(u16),
-    Down(u16),
-    HomeDown(u16),
+    Up(DutyPercent),
+    Down(DutyPercent),
+    HomeDown(DutyPercent),
 }
 
 #[derive(Clone, Copy)]
@@ -215,6 +176,7 @@ pub struct Desk<
 > {
     left: Option<ManagedLeg<'a, LEFT_OP, LeftPwm>>,
     right: Option<ManagedLeg<'a, RIGHT_OP, RightPwm>>,
+    runtime_config_reader: RuntimeConfigReader,
     status_state: &'static DeskStatusState,
     _state: State,
 }
@@ -278,62 +240,14 @@ impl TravelDirection {
     }
 }
 
-impl ObstructionSensitivity {
-    const fn profile(self) -> Option<ObstructionProfile> {
-        match self {
-            Self::None => None,
-            Self::Low => Some(ObstructionProfile {
-                minimum_baseline_percent: 55,
-                consecutive_windows: 3,
-            }),
-            Self::Medium => Some(ObstructionProfile {
-                minimum_baseline_percent: 70,
-                consecutive_windows: 2,
-            }),
-            Self::High => Some(ObstructionProfile {
-                minimum_baseline_percent: 80,
-                consecutive_windows: 2,
-            }),
-        }
-    }
-}
-
-const fn obstruction_detection_time_ms(profile: ObstructionProfile) -> u64 {
-    OBSTRUCTION_WARMUP_DURATION_MS
-        + OBSTRUCTION_SAMPLE_WINDOW_MS * profile.consecutive_windows as u64
-}
-
-const fn longest_obstruction_detection_time_ms() -> u64 {
-    let low = obstruction_detection_time_ms_from_sensitivity(ObstructionSensitivity::Low);
-    let medium = obstruction_detection_time_ms_from_sensitivity(ObstructionSensitivity::Medium);
-    let high = obstruction_detection_time_ms_from_sensitivity(ObstructionSensitivity::High);
-
-    if low >= medium && low >= high {
-        low
-    } else if medium >= high {
-        medium
-    } else {
-        high
-    }
-}
-
-const fn obstruction_detection_time_ms_from_sensitivity(
-    sensitivity: ObstructionSensitivity,
-) -> u64 {
-    match sensitivity.profile() {
-        Some(profile) => obstruction_detection_time_ms(profile),
-        None => 0,
-    }
-}
-
 impl MoveSnapshot {
-    fn new(target: i32, left_position: i32, right_position: i32) -> Self {
+    fn new(config: DeskConfig, target: i32, left_position: i32, right_position: i32) -> Self {
         let left_error = target - left_position;
         let right_error = target - right_position;
-        let left_at_target = left_error.abs() <= DESK_TARGET_TOLERANCE;
-        let right_at_target = right_error.abs() <= DESK_TARGET_TOLERANCE;
-        let left_near = left_error.abs() <= DESK_TARGET_SLOW_ZONE;
-        let right_near = right_error.abs() <= DESK_TARGET_SLOW_ZONE;
+        let left_at_target = left_error.abs() <= config.target_tolerance().get();
+        let right_at_target = right_error.abs() <= config.target_tolerance().get();
+        let left_near = left_error.abs() <= config.target_slow_zone().get();
+        let right_near = right_error.abs() <= config.target_slow_zone().get();
 
         Self {
             observed_skew: left_position - right_position,
@@ -341,12 +255,12 @@ impl MoveSnapshot {
             left: AxisTargetState {
                 at_target: left_at_target,
                 near_target: left_near,
-                base_duty: axis_base_duty(left_near, left_at_target, right_at_target),
+                base_duty: axis_base_duty(config, left_near, left_at_target, right_at_target),
             },
             right: AxisTargetState {
                 at_target: right_at_target,
                 near_target: right_near,
-                base_duty: axis_base_duty(right_near, right_at_target, left_at_target),
+                base_duty: axis_base_duty(config, right_near, right_at_target, left_at_target),
             },
         }
     }
@@ -355,8 +269,8 @@ impl MoveSnapshot {
         self.left.at_target && self.right.at_target && self.observed_skew_abs == 0
     }
 
-    fn is_skew_fault(self) -> bool {
-        self.observed_skew_abs > FAULT_SKEW_COUNTS
+    fn is_skew_fault(self, config: DeskConfig) -> bool {
+        self.observed_skew_abs > config.fault_skew_counts().get()
     }
 
     fn suspends_obstruction_detection(self, phase: SyncPhase) -> bool {
@@ -366,14 +280,16 @@ impl MoveSnapshot {
 
 impl ObstructionMonitor {
     fn new(
+        config: DeskConfig,
         direction: TravelDirection,
         started_at: Instant,
         left_position: i32,
         right_position: i32,
     ) -> Option<Self> {
-        let profile = DEFAULT_OBSTRUCTION_SENSITIVITY.profile()?;
+        let profile = config.obstruction_profile(config.obstruction_sensitivity())?;
 
         Some(Self {
+            config,
             direction,
             profile,
             move_started_at: started_at,
@@ -412,9 +328,9 @@ impl ObstructionMonitor {
 
         if !self.warmed_up {
             let warmed_up = now.saturating_duration_since(self.move_started_at)
-                >= OBSTRUCTION_WARMUP_DURATION
-                && self.max_left_travel >= OBSTRUCTION_WARMUP_COUNTS
-                && self.max_right_travel >= OBSTRUCTION_WARMUP_COUNTS;
+                >= self.config.obstruction_warmup_duration()
+                && self.max_left_travel >= self.config.obstruction_warmup_counts().get()
+                && self.max_right_travel >= self.config.obstruction_warmup_counts().get();
             if warmed_up {
                 self.warmed_up = true;
                 self.consecutive_slow_windows = 0;
@@ -424,7 +340,7 @@ impl ObstructionMonitor {
         }
 
         let elapsed = now.saturating_duration_since(self.window_started_at);
-        if elapsed < OBSTRUCTION_SAMPLE_WINDOW {
+        if elapsed < self.config.obstruction_sample_window() {
             return false;
         }
 
@@ -444,7 +360,7 @@ impl ObstructionMonitor {
         } else {
             let threshold_speed = self
                 .baseline_speed
-                .saturating_mul(self.profile.minimum_baseline_percent)
+                .saturating_mul(self.profile.minimum_baseline_percent().get())
                 / 100;
             if window_speed < threshold_speed {
                 self.consecutive_slow_windows = self.consecutive_slow_windows.saturating_add(1);
@@ -453,7 +369,7 @@ impl ObstructionMonitor {
             }
         }
 
-        let obstructed = self.consecutive_slow_windows >= self.profile.consecutive_windows;
+        let obstructed = self.consecutive_slow_windows >= self.profile.consecutive_windows();
         self.restart_window(now, total_travel);
         obstructed
     }
@@ -590,6 +506,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
 {
     pub fn new(
         storage: &'static DeskStatusStorage,
+        runtime_config_reader: RuntimeConfigReader,
         left: Leg<'a, Unhomed, LEFT_OP, LeftPwm>,
         right: Leg<'a, Unhomed, RIGHT_OP, RightPwm>,
         left_status_watcher: LegStatusWatcher,
@@ -603,7 +520,6 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             needs_rehome: true,
             motion: DeskMotionState::Idle,
             last_stop_reason: DeskStopReason::None,
-            obstruction_sensitivity: DEFAULT_OBSTRUCTION_SENSITIVITY,
             target_active: false,
             target_position: 0,
             left_position,
@@ -632,6 +548,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         let desk = Self {
             left: Some(ManagedLeg::Unhomed(left)),
             right: Some(ManagedLeg::Unhomed(right)),
+            runtime_config_reader,
             status_state,
             _state: UnhomedDesk,
         };
@@ -674,6 +591,9 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
     where
         StopRequested: Fn() -> bool,
     {
+        let runtime_config = self.runtime_config_reader.current();
+        let desk_config = runtime_config.desk();
+        let leg_config = runtime_config.leg();
         self.stop_ready_legs();
         self.update_status(|status| {
             status.motion = DeskMotionState::Homing;
@@ -700,10 +620,10 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
 
         let left_start = left_leg.encoder_position();
         let right_start = right_leg.encoder_position();
-        let homing_start_deadline = Instant::now() + HOMING_START_TIMEOUT;
+        let homing_start_deadline = Instant::now() + desk_config.homing_start_timeout();
 
-        left_leg.apply_drive_mode(DriveMode::DownBoost);
-        right_leg.apply_drive_mode(DriveMode::DownBoost);
+        left_leg.apply_drive_mode(DriveMode::DownBoost, leg_config);
+        right_leg.apply_drive_mode(DriveMode::DownBoost, leg_config);
 
         let left_direction = left_leg.down_direction();
         let right_direction = right_leg.down_direction();
@@ -714,8 +634,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
 
         loop {
             if stop_requested() {
-                left_leg.apply_drive_mode(DriveMode::Stop);
-                right_leg.apply_drive_mode(DriveMode::Stop);
+                left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                 return Err(self.restore_unhomed(left_leg, right_leg, DeskError::Stopped));
             }
 
@@ -724,8 +644,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 if progressed_in_direction(left_start, current_position, left_direction) {
                     left_started = true;
                 } else if progressed_in_direction(left_start, current_position, left_up_direction) {
-                    left_leg.apply_drive_mode(DriveMode::Stop);
-                    right_leg.apply_drive_mode(DriveMode::Stop);
+                    left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                     return Err(self.restore_unhomed(
                         left_leg,
                         right_leg,
@@ -740,8 +660,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                     right_started = true;
                 } else if progressed_in_direction(right_start, current_position, right_up_direction)
                 {
-                    left_leg.apply_drive_mode(DriveMode::Stop);
-                    right_leg.apply_drive_mode(DriveMode::Stop);
+                    left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                     return Err(self.restore_unhomed(
                         left_leg,
                         right_leg,
@@ -755,8 +675,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             }
 
             if Instant::now() >= homing_start_deadline {
-                left_leg.apply_drive_mode(DriveMode::Stop);
-                right_leg.apply_drive_mode(DriveMode::Stop);
+                left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                 let error = if !left_started {
                     DeskError::LeftLeg(LegError::HomingStartTimeout)
                 } else {
@@ -765,11 +685,11 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 return Err(self.restore_unhomed(left_leg, right_leg, error));
             }
 
-            Timer::after(HOMING_POLL_INTERVAL).await;
+            Timer::after(desk_config.homing_poll_interval()).await;
         }
 
-        left_leg.apply_drive_mode(DriveMode::HomeDown);
-        right_leg.apply_drive_mode(DriveMode::HomeDown);
+        left_leg.apply_drive_mode(DriveMode::HomeDown, leg_config);
+        right_leg.apply_drive_mode(DriveMode::HomeDown, leg_config);
 
         let mut left_last_position = left_leg.encoder_position();
         let mut right_last_position = right_leg.encoder_position();
@@ -781,12 +701,12 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
 
         while !left_stalled || !right_stalled {
             if stop_requested() {
-                left_leg.apply_drive_mode(DriveMode::Stop);
-                right_leg.apply_drive_mode(DriveMode::Stop);
+                left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                 return Err(self.restore_unhomed(left_leg, right_leg, DeskError::Stopped));
             }
 
-            Timer::after(HOMING_POLL_INTERVAL).await;
+            Timer::after(desk_config.homing_poll_interval()).await;
 
             if !left_stalled {
                 let current_position = left_leg.encoder_position();
@@ -794,9 +714,9 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                     left_last_position = current_position;
                     left_last_progress = Instant::now();
                 } else if Instant::now().saturating_duration_since(left_last_progress)
-                    >= HOMING_STALL_TIMEOUT
+                    >= desk_config.homing_stall_timeout()
                 {
-                    left_leg.apply_drive_mode(DriveMode::Stop);
+                    left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                     left_stalled = true;
                 }
             }
@@ -807,9 +727,9 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                     right_last_position = current_position;
                     right_last_progress = Instant::now();
                 } else if Instant::now().saturating_duration_since(right_last_progress)
-                    >= HOMING_STALL_TIMEOUT
+                    >= desk_config.homing_stall_timeout()
                 {
-                    right_leg.apply_drive_mode(DriveMode::Stop);
+                    right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                     right_stalled = true;
                 }
             }
@@ -821,20 +741,20 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             let observed_skew = left_travel - right_travel;
             let homing_skew = observed_skew.abs();
 
-            if homing_skew > HOMING_FAULT_SKEW_COUNTS {
-                left_leg.apply_drive_mode(DriveMode::Stop);
-                right_leg.apply_drive_mode(DriveMode::Stop);
+            if homing_skew > desk_config.homing_fault_skew_counts().get() {
+                left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                 return Err(self.restore_unhomed(left_leg, right_leg, DeskError::SkewFault));
             }
 
-            homing_sync_phase = next_sync_phase(homing_sync_phase, homing_skew);
+            homing_sync_phase = next_sync_phase(desk_config, homing_sync_phase, homing_skew);
             let lead_left = observed_skew > 0;
             let active_phase = if !left_stalled && !right_stalled {
                 homing_sync_phase
             } else {
                 SyncPhase::Balanced
             };
-            let mut plan = plan_homing_down(active_phase, lead_left);
+            let mut plan = plan_homing_down(desk_config, active_phase, lead_left);
 
             if left_stalled {
                 plan.left = LegPlan::Stop;
@@ -843,7 +763,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 plan.right = LegPlan::Stop;
             }
 
-            apply_dual_plan(&mut left_leg, &mut right_leg, plan);
+            apply_dual_plan(&mut left_leg, &mut right_leg, plan, leg_config);
         }
 
         let mut left_backoff_position = left_leg.encoder_position();
@@ -857,17 +777,17 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         let mut left_boosting = true;
         let mut right_boosting = true;
 
-        left_leg.apply_drive_mode(DriveMode::UpBoost);
-        right_leg.apply_drive_mode(DriveMode::UpBoost);
+        left_leg.apply_drive_mode(DriveMode::UpBoost, leg_config);
+        right_leg.apply_drive_mode(DriveMode::UpBoost, leg_config);
 
         while !left_backoff_done || !right_backoff_done {
             if stop_requested() {
-                left_leg.apply_drive_mode(DriveMode::Stop);
-                right_leg.apply_drive_mode(DriveMode::Stop);
+                left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                 return Err(self.restore_unhomed(left_leg, right_leg, DeskError::Stopped));
             }
 
-            Timer::after(HOMING_POLL_INTERVAL).await;
+            Timer::after(desk_config.homing_poll_interval()).await;
 
             if !left_backoff_done {
                 let current_position = left_leg.encoder_position();
@@ -878,19 +798,19 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                     left_backoff += progress;
                     left_backoff_position = current_position;
                     if left_boosting {
-                        left_leg.apply_drive_mode(DriveMode::UpRun);
+                        left_leg.apply_drive_mode(DriveMode::UpRun, leg_config);
                         left_boosting = false;
                     }
                 }
 
-                if left_backoff >= HOMING_BACKOFF_STEPS {
-                    left_leg.apply_drive_mode(DriveMode::Stop);
+                if left_backoff >= desk_config.homing_backoff_steps().get() {
+                    left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                     left_backoff_done = true;
                 } else if Instant::now().saturating_duration_since(left_backoff_progress_at)
-                    >= DESK_MOVE_TIMEOUT
+                    >= desk_config.move_timeout()
                 {
-                    left_leg.apply_drive_mode(DriveMode::Stop);
-                    right_leg.apply_drive_mode(DriveMode::Stop);
+                    left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                     return Err(self.restore_unhomed(
                         left_leg,
                         right_leg,
@@ -911,19 +831,19 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                     right_backoff += progress;
                     right_backoff_position = current_position;
                     if right_boosting {
-                        right_leg.apply_drive_mode(DriveMode::UpRun);
+                        right_leg.apply_drive_mode(DriveMode::UpRun, leg_config);
                         right_boosting = false;
                     }
                 }
 
-                if right_backoff >= HOMING_BACKOFF_STEPS {
-                    right_leg.apply_drive_mode(DriveMode::Stop);
+                if right_backoff >= desk_config.homing_backoff_steps().get() {
+                    right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                     right_backoff_done = true;
                 } else if Instant::now().saturating_duration_since(right_backoff_progress_at)
-                    >= DESK_MOVE_TIMEOUT
+                    >= desk_config.move_timeout()
                 {
-                    left_leg.apply_drive_mode(DriveMode::Stop);
-                    right_leg.apply_drive_mode(DriveMode::Stop);
+                    left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                     return Err(self.restore_unhomed(
                         left_leg,
                         right_leg,
@@ -932,19 +852,19 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 }
             }
 
-            if (left_backoff - right_backoff).abs() > FAULT_SKEW_COUNTS {
-                left_leg.apply_drive_mode(DriveMode::Stop);
-                right_leg.apply_drive_mode(DriveMode::Stop);
+            if (left_backoff - right_backoff).abs() > desk_config.fault_skew_counts().get() {
+                left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                 return Err(self.restore_unhomed(left_leg, right_leg, DeskError::SkewFault));
             }
         }
 
-        left_leg.apply_drive_mode(DriveMode::Stop);
-        right_leg.apply_drive_mode(DriveMode::Stop);
+        left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+        right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
         left_leg.reset_position();
         right_leg.reset_position();
-        let left_leg = left_leg.into_ready();
-        let right_leg = right_leg.into_ready();
+        let left_leg = left_leg.into_ready_with_config(leg_config);
+        let right_leg = right_leg.into_ready_with_config(leg_config);
         let left_status = left_leg.status();
         let right_status = right_leg.status();
         left_leg.publish_status();
@@ -967,6 +887,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         Ok(Desk {
             left: Some(ManagedLeg::Ready(left_leg)),
             right: Some(ManagedLeg::Ready(right_leg)),
+            runtime_config_reader: self.runtime_config_reader,
             status_state: self.status_state,
             _state: ReadyDesk,
         })
@@ -1026,6 +947,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         Desk {
             left: Some(left),
             right: Some(right),
+            runtime_config_reader: self.runtime_config_reader,
             status_state: self.status_state,
             _state: UnhomedDesk,
         }
@@ -1052,7 +974,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
 
     pub async fn move_to<StopRequested>(
         mut self,
-        target_position: i32,
+        target_position: PositionCounts,
         stop_requested: StopRequested,
     ) -> Result<
         (
@@ -1067,6 +989,9 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
     where
         StopRequested: Fn() -> bool,
     {
+        let runtime_config = self.runtime_config_reader.current();
+        let desk_config = runtime_config.desk();
+        let leg_config = runtime_config.leg();
         let status = self.status();
         if !status.homed || status.needs_rehome {
             return Err(self.fail_move(DeskError::RehomeRequired));
@@ -1077,8 +1002,13 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             return Ok((self, DeskMoveOutcome::StoppedByRequest));
         }
 
-        let shared_target = target_position.clamp(status.min_position, status.max_position);
-        if (shared_target - status.average_position).abs() <= DESK_TARGET_TOLERANCE {
+        let shared_target = target_position
+            .clamp(
+                PositionCounts::new(status.min_position),
+                PositionCounts::new(status.max_position),
+            )
+            .get();
+        if (shared_target - status.average_position).abs() <= desk_config.target_tolerance().get() {
             self.stop_with_reason(DeskStopReason::TargetReached);
             return Ok((self, DeskMoveOutcome::Completed));
         }
@@ -1100,12 +1030,12 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             let (left_leg, right_leg) = self.ready_legs_mut();
             match direction {
                 TravelDirection::Up => {
-                    left_leg.start_up_boost();
-                    right_leg.start_up_boost();
+                    left_leg.start_up_boost(leg_config);
+                    right_leg.start_up_boost(leg_config);
                 }
                 TravelDirection::Down => {
-                    left_leg.start_down_boost();
-                    right_leg.start_down_boost();
+                    left_leg.start_down_boost(leg_config);
+                    right_leg.start_down_boost(leg_config);
                 }
             }
         }
@@ -1127,6 +1057,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         let mut sync_phase = SyncPhase::Balanced;
         let move_started_at = Instant::now();
         let mut obstruction_monitor = ObstructionMonitor::new(
+            desk_config,
             direction,
             move_started_at,
             left_status.position,
@@ -1140,7 +1071,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             }
 
             match with_deadline(
-                Instant::now() + DESK_MOVE_TIMEOUT,
+                Instant::now() + desk_config.move_timeout(),
                 select(
                     left_progress_watcher.wait_for_change(),
                     right_progress_watcher.wait_for_change(),
@@ -1153,27 +1084,32 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 Err(_) => return Err(self.fail_move(DeskError::MoveTimeout)),
             };
 
-            let snapshot =
-                MoveSnapshot::new(shared_target, left_status.position, right_status.position);
+            let snapshot = MoveSnapshot::new(
+                desk_config,
+                shared_target,
+                left_status.position,
+                right_status.position,
+            );
 
             if snapshot.is_complete() {
                 self.stop_with_reason(DeskStopReason::TargetReached);
                 return Ok((self, DeskMoveOutcome::Completed));
             }
 
-            if snapshot.is_skew_fault() {
+            if snapshot.is_skew_fault(desk_config) {
                 return Err(self.fail_move(DeskError::SkewFault));
             }
 
-            sync_phase = next_sync_phase(sync_phase, snapshot.observed_skew_abs);
+            sync_phase = next_sync_phase(desk_config, sync_phase, snapshot.observed_skew_abs);
             let (left_leg, right_leg) = self.ready_legs_mut();
             let plan = plan_move(
+                desk_config,
                 direction,
                 sync_phase,
                 direction.lead_left(snapshot.observed_skew),
                 snapshot,
             );
-            apply_dual_plan(left_leg, right_leg, plan);
+            apply_dual_plan(left_leg, right_leg, plan, leg_config);
 
             if obstruction_monitor.as_mut().is_some_and(|monitor| {
                 monitor.observe(
@@ -1215,29 +1151,29 @@ fn travel_in_direction(
     }
 }
 
-fn next_sync_phase(current: SyncPhase, effective_skew_abs: i32) -> SyncPhase {
+fn next_sync_phase(config: DeskConfig, current: SyncPhase, effective_skew_abs: i32) -> SyncPhase {
     match current {
         SyncPhase::Balanced => {
-            if effective_skew_abs >= CATCH_UP_ENTER_COUNTS {
+            if effective_skew_abs >= config.catch_up_enter_counts().get() {
                 SyncPhase::PauseLead
-            } else if effective_skew_abs >= SYNC_SPEEDUP_ENTER_COUNTS {
+            } else if effective_skew_abs >= config.sync_speedup_enter_counts().get() {
                 SyncPhase::SpeedMatch
             } else {
                 SyncPhase::Balanced
             }
         }
         SyncPhase::SpeedMatch => {
-            if effective_skew_abs >= CATCH_UP_ENTER_COUNTS {
+            if effective_skew_abs >= config.catch_up_enter_counts().get() {
                 SyncPhase::PauseLead
-            } else if effective_skew_abs <= SYNC_SPEEDUP_EXIT_COUNTS {
+            } else if effective_skew_abs <= config.sync_speedup_exit_counts().get() {
                 SyncPhase::Balanced
             } else {
                 SyncPhase::SpeedMatch
             }
         }
         SyncPhase::PauseLead => {
-            if effective_skew_abs <= CATCH_UP_EXIT_COUNTS {
-                if effective_skew_abs >= SYNC_SPEEDUP_ENTER_COUNTS {
+            if effective_skew_abs <= config.catch_up_exit_counts().get() {
+                if effective_skew_abs >= config.sync_speedup_enter_counts().get() {
                     SyncPhase::SpeedMatch
                 } else {
                     SyncPhase::Balanced
@@ -1249,35 +1185,41 @@ fn next_sync_phase(current: SyncPhase, effective_skew_abs: i32) -> SyncPhase {
     }
 }
 
-fn axis_base_duty(near: bool, at_target: bool, other_at_target: bool) -> u16 {
+fn axis_base_duty(
+    config: DeskConfig,
+    near: bool,
+    at_target: bool,
+    other_at_target: bool,
+) -> DutyPercent {
     if other_at_target && !at_target {
-        MOVE_RUN_DUTY
+        config.move_run_duty()
     } else if near {
-        MOVE_SLOW_DUTY
+        config.move_slow_duty()
     } else {
-        MOVE_RUN_DUTY
+        config.move_run_duty()
     }
 }
 
-fn clamp_duty(base: u16, trim: i16) -> u16 {
-    (base as i16 + trim).clamp(0, 99) as u16
+fn clamp_duty(base: DutyPercent, trim: DutyPercentTrim) -> DutyPercent {
+    DutyPercent::from_clamped_i32(base.get() as i32 + trim.get())
 }
 
-fn clamp_drive_duty(base: u16, trim: i16) -> u16 {
-    clamp_duty(base, trim).max(MIN_MOVE_DUTY)
+fn clamp_drive_duty(config: DeskConfig, base: DutyPercent, trim: DutyPercentTrim) -> DutyPercent {
+    clamp_duty(base, trim).max(config.min_move_duty())
 }
 
-fn sync_trim(phase: SyncPhase, is_leader: bool, step: i16) -> i16 {
+fn sync_trim(phase: SyncPhase, is_leader: bool, step: DutyPercentTrim) -> DutyPercentTrim {
     match phase {
-        SyncPhase::Balanced => 0,
-        SyncPhase::SpeedMatch if is_leader => -step,
+        SyncPhase::Balanced => DutyPercentTrim::new(0),
+        SyncPhase::SpeedMatch if is_leader => DutyPercentTrim::new(-(step.get() as i8)),
         SyncPhase::SpeedMatch => step,
-        SyncPhase::PauseLead if is_leader => 0,
+        SyncPhase::PauseLead if is_leader => DutyPercentTrim::new(0),
         SyncPhase::PauseLead => step,
     }
 }
 
 fn plan_move_leg(
+    config: DeskConfig,
     direction: TravelDirection,
     axis: AxisTargetState,
     phase: SyncPhase,
@@ -1288,8 +1230,9 @@ fn plan_move_leg(
     }
 
     let duty = clamp_drive_duty(
+        config,
         axis.base_duty,
-        sync_trim(phase, is_leader, MOVE_SYNC_DUTY_STEP),
+        sync_trim(phase, is_leader, config.move_sync_duty_step()),
     );
     match direction {
         TravelDirection::Up => LegPlan::Up(duty),
@@ -1298,32 +1241,35 @@ fn plan_move_leg(
 }
 
 fn plan_move(
+    config: DeskConfig,
     direction: TravelDirection,
     phase: SyncPhase,
     lead_left: bool,
     snapshot: MoveSnapshot,
 ) -> DualLegPlan {
     DualLegPlan {
-        left: plan_move_leg(direction, snapshot.left, phase, lead_left),
-        right: plan_move_leg(direction, snapshot.right, phase, !lead_left),
+        left: plan_move_leg(config, direction, snapshot.left, phase, lead_left),
+        right: plan_move_leg(config, direction, snapshot.right, phase, !lead_left),
     }
 }
 
-fn plan_homing_down(phase: SyncPhase, lead_left: bool) -> DualLegPlan {
+fn plan_homing_down(config: DeskConfig, phase: SyncPhase, lead_left: bool) -> DualLegPlan {
     let left_plan = if matches!(phase, SyncPhase::PauseLead) && lead_left {
         LegPlan::Stop
     } else {
         LegPlan::HomeDown(clamp_drive_duty(
-            HOMING_RUN_DUTY,
-            sync_trim(phase, lead_left, HOMING_SYNC_DUTY_STEP),
+            config,
+            config.homing_run_duty(),
+            sync_trim(phase, lead_left, config.homing_sync_duty_step()),
         ))
     };
     let right_plan = if matches!(phase, SyncPhase::PauseLead) && !lead_left {
         LegPlan::Stop
     } else {
         LegPlan::HomeDown(clamp_drive_duty(
-            HOMING_RUN_DUTY,
-            sync_trim(phase, !lead_left, HOMING_SYNC_DUTY_STEP),
+            config,
+            config.homing_run_duty(),
+            sync_trim(phase, !lead_left, config.homing_sync_duty_step()),
         ))
     };
 
@@ -1336,12 +1282,13 @@ fn plan_homing_down(phase: SyncPhase, lead_left: bool) -> DualLegPlan {
 fn apply_leg_plan<State, const OP: u8, PWM: PwmPeripheral>(
     leg: &mut Leg<'_, State, OP, PWM>,
     plan: LegPlan,
+    leg_config: LegRuntimeConfig,
 ) {
     match plan {
-        LegPlan::Stop => leg.apply_drive_mode(DriveMode::Stop),
-        LegPlan::Up(duty) => leg.drive_up_duty(duty),
-        LegPlan::Down(duty) => leg.drive_down_duty(duty),
-        LegPlan::HomeDown(duty) => leg.drive_home_down_duty(duty),
+        LegPlan::Stop => leg.apply_drive_mode(DriveMode::Stop, leg_config),
+        LegPlan::Up(duty) => leg.drive_up_duty(duty, leg_config),
+        LegPlan::Down(duty) => leg.drive_down_duty(duty, leg_config),
+        LegPlan::HomeDown(duty) => leg.drive_home_down_duty(duty, leg_config),
     }
 }
 
@@ -1356,7 +1303,8 @@ fn apply_dual_plan<
     left_leg: &mut Leg<'_, LeftState, LEFT_OP, LeftPwm>,
     right_leg: &mut Leg<'_, RightState, RIGHT_OP, RightPwm>,
     plan: DualLegPlan,
+    leg_config: LegRuntimeConfig,
 ) {
-    apply_leg_plan(left_leg, plan.left);
-    apply_leg_plan(right_leg, plan.right);
+    apply_leg_plan(left_leg, plan.left, leg_config);
+    apply_leg_plan(right_leg, plan.right, leg_config);
 }

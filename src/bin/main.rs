@@ -18,29 +18,34 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 use esp_pwm_motor::{
+    config::RuntimeConfigStorage,
     controller::{DeskCommand, DeskControllerState},
     desk::{Desk, DeskMoveOutcome, DeskStatusStorage, ReadyDesk, UnhomedDesk},
     leg::{DriveSide, LegConfig, LegStatusStorage},
     motor::Motor,
     quadrature::{Quadrature, QuadratureDirection, QuadratureStorage},
+    units::{PWM_TIMER_MAX_TICKS, PositionCounts, RelativeCounts},
 };
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-const PWM_PERIOD_TICKS: u16 = 99;
+const PWM_PERIOD_TICKS: u16 = PWM_TIMER_MAX_TICKS;
 const PWM_FREQUENCY_KHZ: u32 = 20;
 
 fn clamp_relative_target(
     current_position: i32,
     min_position: i32,
     max_position: i32,
-    delta: i32,
-) -> i32 {
-    current_position
+    delta: RelativeCounts,
+) -> PositionCounts {
+    PositionCounts::new(current_position)
         .saturating_add(delta)
-        .clamp(min_position, max_position)
+        .clamp(
+            PositionCounts::new(min_position),
+            PositionCounts::new(max_position),
+        )
 }
 
 enum DeskRuntime<
@@ -156,7 +161,7 @@ async fn run_desk_control<
                                 DeskRuntime::Ready(desk)
                             }
                             Err((desk, error)) => {
-                                warn!("move to {} failed: {:?}", target_position, error);
+                                warn!("move to {} failed: {:?}", target_position.get(), error);
                                 control_state.fault(error);
                                 DeskRuntime::Unhomed(desk)
                             }
@@ -187,8 +192,8 @@ async fn run_desk_control<
                             delta,
                         );
 
-                        if target_position == status.average_position {
-                            info!("relative move {} ignored at desk limit", delta);
+                        if target_position.get() == status.average_position {
+                            info!("relative move {} ignored at desk limit", delta.get());
                             control_state.finish_ready();
                             DeskRuntime::Ready(desk)
                         } else {
@@ -219,7 +224,7 @@ async fn run_desk_control<
                                     DeskRuntime::Ready(desk)
                                 }
                                 Err((desk, error)) => {
-                                    warn!("move by {} failed: {:?}", delta, error);
+                                    warn!("move by {} failed: {:?}", delta.get(), error);
                                     control_state.fault(error);
                                     DeskRuntime::Unhomed(desk)
                                 }
@@ -243,6 +248,7 @@ async fn main(spawner: Spawner) -> ! {
     static LEG1_STATUS_STORAGE: LegStatusStorage = LegStatusStorage::new();
     static LEG2_STATUS_STORAGE: LegStatusStorage = LegStatusStorage::new();
     static DESK_STATUS_STORAGE: DeskStatusStorage = DeskStatusStorage::new();
+    static RUNTIME_CONFIG_STORAGE: RuntimeConfigStorage = RuntimeConfigStorage::new();
     static DESK_CONTROL_STATE_STORAGE: StaticCell<DeskControllerState> = StaticCell::new();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -328,12 +334,15 @@ async fn main(spawner: Spawner) -> ! {
     motor_1.enable();
     motor_2.enable();
 
+    let runtime_config_reader = RUNTIME_CONFIG_STORAGE.init(Default::default()).reader();
+
     let leg_1 = esp_pwm_motor::leg::Leg::new(
         &LEG1_STATUS_STORAGE,
         LegConfig {
             up_drive: DriveSide::Left,
             up_direction: QuadratureDirection::Positive,
         },
+        runtime_config_reader,
         motor_1,
         leg_watcher_1,
         leg_status_source_1,
@@ -347,6 +356,7 @@ async fn main(spawner: Spawner) -> ! {
             up_drive: DriveSide::Left,
             up_direction: QuadratureDirection::Positive,
         },
+        runtime_config_reader,
         motor_2,
         leg_watcher_2,
         leg_status_source_2,
@@ -356,6 +366,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let desk = Desk::new(
         &DESK_STATUS_STORAGE,
+        runtime_config_reader,
         leg_1,
         leg_2,
         desk_left_status_watcher,
@@ -364,7 +375,10 @@ async fn main(spawner: Spawner) -> ! {
     );
     let control_state = DESK_CONTROL_STATE_STORAGE
         .uninit()
-        .write(DeskControllerState::new(desk.status_reader()));
+        .write(DeskControllerState::new(
+            desk.status_reader(),
+            runtime_config_reader,
+        ));
 
     let web_app = esp_pwm_motor::web::WebApp::new(control_state);
     for id in 0..esp_pwm_motor::web::WEB_TASK_POOL_SIZE {

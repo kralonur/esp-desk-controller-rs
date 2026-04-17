@@ -6,13 +6,15 @@ use embassy_sync::{
     channel::Channel,
 };
 
+use crate::config::{ObstructionSensitivity, RuntimeConfigReader};
 use crate::desk::{DeskError, DeskStatus, DeskStatusReader};
+use crate::units::{PositionCounts, RelativeCounts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub enum DeskCommand {
     Home,
-    MoveTo(i32),
-    MoveBy(i32),
+    MoveTo(PositionCounts),
+    MoveBy(RelativeCounts),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
@@ -59,10 +61,14 @@ pub struct DeskControllerState {
     commands: Channel<CriticalSectionRawMutex, DeskCommand, 1>,
     snapshot: Mutex<CriticalSectionRawMutex, Cell<DeskControllerSnapshot>>,
     status_reader: DeskStatusReader,
+    runtime_config_reader: RuntimeConfigReader,
 }
 
 impl DeskControllerState {
-    pub fn new(status_reader: DeskStatusReader) -> Self {
+    pub fn new(
+        status_reader: DeskStatusReader,
+        runtime_config_reader: RuntimeConfigReader,
+    ) -> Self {
         Self {
             commands: Channel::new(),
             snapshot: Mutex::new(Cell::new(DeskControllerSnapshot {
@@ -72,6 +78,7 @@ impl DeskControllerState {
                 last_fault: None,
             })),
             status_reader,
+            runtime_config_reader,
         }
     }
 
@@ -81,6 +88,13 @@ impl DeskControllerState {
 
     pub fn status(&self) -> DeskStatus {
         self.status_reader.current()
+    }
+
+    pub fn obstruction_sensitivity(&self) -> ObstructionSensitivity {
+        self.runtime_config_reader
+            .current()
+            .desk()
+            .obstruction_sensitivity()
     }
 
     pub fn submit_home(&self) -> CommandSubmission {
@@ -101,11 +115,11 @@ impl DeskControllerState {
         }
     }
 
-    pub fn submit_move_to(&self, position: i32) -> CommandSubmission {
+    pub fn submit_move_to(&self, position: PositionCounts) -> CommandSubmission {
         self.submit_motion(DeskCommand::MoveTo(position))
     }
 
-    pub fn submit_move_by(&self, delta: i32) -> CommandSubmission {
+    pub fn submit_move_by(&self, delta: RelativeCounts) -> CommandSubmission {
         self.submit_motion(DeskCommand::MoveBy(delta))
     }
 

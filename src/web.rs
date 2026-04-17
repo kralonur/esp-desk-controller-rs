@@ -9,11 +9,13 @@ use picoserve::{
     routing::{RequestHandlerService, parse_path_segment},
 };
 
+use crate::config::ObstructionSensitivity;
 use crate::controller::{
     CommandSubmission, DeskControllerMode, DeskControllerSnapshot, DeskControllerState, DeskFault,
     StopSubmission,
 };
-use crate::desk::{DeskMotionState, DeskStopReason, ObstructionSensitivity};
+use crate::desk::{DeskMotionState, DeskStopReason};
+use crate::units::{PositionCounts, RelativeCounts};
 
 async fn index() -> &'static str {
     "Endpoints: GET /status, POST /home, /stop, /up/<steps>, /down/<steps>, /move/<position>\n"
@@ -32,16 +34,28 @@ fn stop_response(state: &DeskControllerState) -> String {
 
 fn up_response(state: &DeskControllerState, steps: i32) -> String {
     let steps = steps.abs();
-    submission_response("up", state.submit_move_by(steps), state.snapshot())
+    submission_response(
+        "up",
+        state.submit_move_by(RelativeCounts::new(steps)),
+        state.snapshot(),
+    )
 }
 
 fn down_response(state: &DeskControllerState, steps: i32) -> String {
     let steps = steps.abs();
-    submission_response("down", state.submit_move_by(-steps), state.snapshot())
+    submission_response(
+        "down",
+        state.submit_move_by(RelativeCounts::new(-steps)),
+        state.snapshot(),
+    )
 }
 
 fn move_to_response(state: &DeskControllerState, position: i32) -> String {
-    submission_response("move", state.submit_move_to(position), state.snapshot())
+    submission_response(
+        "move",
+        state.submit_move_to(PositionCounts::new(position)),
+        state.snapshot(),
+    )
 }
 
 fn status_response(state: &DeskControllerState) -> String {
@@ -57,7 +71,7 @@ fn status_response(state: &DeskControllerState) -> String {
         bool_name(status.needs_rehome),
         motion_name(status.motion),
         stop_reason_name(status.last_stop_reason),
-        obstruction_sensitivity_name(status.obstruction_sensitivity),
+        obstruction_sensitivity_name(state.obstruction_sensitivity()),
         bool_name(status.target_active),
         status.target_position,
         status.average_position,
