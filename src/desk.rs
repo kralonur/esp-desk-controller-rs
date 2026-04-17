@@ -266,7 +266,7 @@ impl MoveSnapshot {
     }
 
     fn is_complete(self) -> bool {
-        self.left.at_target && self.right.at_target && self.observed_skew_abs == 0
+        self.left.at_target && self.right.at_target
     }
 
     fn is_skew_fault(self, config: DeskConfig) -> bool {
