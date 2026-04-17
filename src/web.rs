@@ -13,7 +13,7 @@ use crate::controller::{
     CommandSubmission, DeskControllerMode, DeskControllerSnapshot, DeskControllerState, DeskFault,
     StopSubmission,
 };
-use crate::desk::DeskMotionState;
+use crate::desk::{DeskMotionState, DeskStopReason, ObstructionSensitivity};
 
 async fn index() -> &'static str {
     "Endpoints: GET /status, POST /home, /stop, /up/<steps>, /down/<steps>, /move/<position>\n"
@@ -48,7 +48,7 @@ fn status_response(state: &DeskControllerState) -> String {
     let snapshot = state.snapshot();
     let status = state.status();
     format!(
-        "mode={}\ncommand_pending={}\nstop_requested={}\nlast_fault={}\nhomed={}\nneeds_rehome={}\nmotion={}\ntarget_active={}\ntarget_position={}\naverage_position={}\nleft_position={}\nright_position={}\nmin_position={}\nmax_position={}\nskew_counts={}\n",
+        "mode={}\ncommand_pending={}\nstop_requested={}\nlast_fault={}\nhomed={}\nneeds_rehome={}\nmotion={}\nlast_stop_reason={}\nobstruction_sensitivity={}\ntarget_active={}\ntarget_position={}\naverage_position={}\nleft_position={}\nright_position={}\nmin_position={}\nmax_position={}\nskew_counts={}\n",
         controller_mode_name(snapshot.mode),
         bool_name(snapshot.command_pending),
         bool_name(snapshot.stop_requested),
@@ -56,6 +56,8 @@ fn status_response(state: &DeskControllerState) -> String {
         bool_name(status.homed),
         bool_name(status.needs_rehome),
         motion_name(status.motion),
+        stop_reason_name(status.last_stop_reason),
+        obstruction_sensitivity_name(status.obstruction_sensitivity),
         bool_name(status.target_active),
         status.target_position,
         status.average_position,
@@ -133,6 +135,24 @@ fn motion_name(motion: DeskMotionState) -> &'static str {
         DeskMotionState::Homing => "homing",
         DeskMotionState::MovingUp => "moving_up",
         DeskMotionState::MovingDown => "moving_down",
+    }
+}
+
+fn stop_reason_name(reason: DeskStopReason) -> &'static str {
+    match reason {
+        DeskStopReason::None => "none",
+        DeskStopReason::TargetReached => "target_reached",
+        DeskStopReason::UserStop => "user_stop",
+        DeskStopReason::Obstruction => "obstruction",
+    }
+}
+
+fn obstruction_sensitivity_name(sensitivity: ObstructionSensitivity) -> &'static str {
+    match sensitivity {
+        ObstructionSensitivity::None => "none",
+        ObstructionSensitivity::Low => "low",
+        ObstructionSensitivity::Medium => "medium",
+        ObstructionSensitivity::High => "high",
     }
 }
 

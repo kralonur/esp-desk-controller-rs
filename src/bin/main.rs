@@ -19,7 +19,7 @@ use esp_hal::{
 };
 use esp_pwm_motor::{
     controller::{DeskCommand, DeskControllerState},
-    desk::{Desk, DeskStatusStorage, ReadyDesk, UnhomedDesk},
+    desk::{Desk, DeskMoveOutcome, DeskStatusStorage, ReadyDesk, UnhomedDesk},
     leg::{DriveSide, LegConfig, LegStatusStorage},
     motor::Motor,
     quadrature::{Quadrature, QuadratureDirection, QuadratureStorage},
@@ -136,9 +136,22 @@ async fn run_desk_control<
                             .move_to(target_position, || control_state.stop_requested())
                             .await
                         {
-                            Ok(desk) => {
+                            Ok((desk, outcome)) => {
                                 let position = desk.status().average_position;
-                                info!("move_to command finished at {}", position);
+                                match outcome {
+                                    DeskMoveOutcome::Completed => {
+                                        info!("move_to command finished at {}", position);
+                                    }
+                                    DeskMoveOutcome::StoppedByRequest => {
+                                        info!("move_to command stopped by request at {}", position);
+                                    }
+                                    DeskMoveOutcome::StoppedByObstruction => {
+                                        warn!(
+                                            "move_to command stopped by obstruction at {}",
+                                            position
+                                        );
+                                    }
+                                }
                                 control_state.finish_ready();
                                 DeskRuntime::Ready(desk)
                             }
@@ -183,9 +196,25 @@ async fn run_desk_control<
                                 .move_to(target_position, || control_state.stop_requested())
                                 .await
                             {
-                                Ok(desk) => {
+                                Ok((desk, outcome)) => {
                                     let position = desk.status().average_position;
-                                    info!("move_by command finished at {}", position);
+                                    match outcome {
+                                        DeskMoveOutcome::Completed => {
+                                            info!("move_by command finished at {}", position);
+                                        }
+                                        DeskMoveOutcome::StoppedByRequest => {
+                                            info!(
+                                                "move_by command stopped by request at {}",
+                                                position
+                                            );
+                                        }
+                                        DeskMoveOutcome::StoppedByObstruction => {
+                                            warn!(
+                                                "move_by command stopped by obstruction at {}",
+                                                position
+                                            );
+                                        }
+                                    }
                                     control_state.finish_ready();
                                     DeskRuntime::Ready(desk)
                                 }

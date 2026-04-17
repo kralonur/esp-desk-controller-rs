@@ -17,7 +17,13 @@ use crate::quadrature::QuadratureDirection;
 
 const DESK_TARGET_TOLERANCE: i32 = 5;
 const DESK_TARGET_SLOW_ZONE: i32 = 10;
-const DESK_MOVE_TIMEOUT: Duration = Duration::from_millis(1200);
+const DESK_MOVE_TIMEOUT_MS: u64 = 1_200;
+const DESK_MOVE_TIMEOUT: Duration = Duration::from_millis(DESK_MOVE_TIMEOUT_MS);
+const OBSTRUCTION_SAMPLE_WINDOW_MS: u64 = 150;
+const OBSTRUCTION_SAMPLE_WINDOW: Duration = Duration::from_millis(OBSTRUCTION_SAMPLE_WINDOW_MS);
+const OBSTRUCTION_WARMUP_DURATION_MS: u64 = 300;
+const OBSTRUCTION_WARMUP_DURATION: Duration = Duration::from_millis(OBSTRUCTION_WARMUP_DURATION_MS);
+const OBSTRUCTION_WARMUP_COUNTS: i32 = 8;
 const MIN_MOVE_DUTY: u16 = 10;
 const MOVE_RUN_DUTY: u16 = 30;
 const MOVE_SLOW_DUTY: u16 = 15;
@@ -34,6 +40,8 @@ const CATCH_UP_ENTER_COUNTS: i32 = 30;
 const CATCH_UP_EXIT_COUNTS: i32 = 12;
 const FAULT_SKEW_COUNTS: i32 = 80;
 const HOMING_FAULT_SKEW_COUNTS: i32 = 160;
+const DEFAULT_OBSTRUCTION_SENSITIVITY: ObstructionSensitivity = ObstructionSensitivity::High;
+const _: [(); 1] = [(); (DESK_MOVE_TIMEOUT_MS > longest_obstruction_detection_time_ms()) as usize];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub enum DeskMotionState {
@@ -44,10 +52,28 @@ pub enum DeskMotionState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+pub enum DeskStopReason {
+    None,
+    TargetReached,
+    UserStop,
+    Obstruction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+pub enum ObstructionSensitivity {
+    None,
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub struct DeskStatus {
     pub homed: bool,
     pub needs_rehome: bool,
     pub motion: DeskMotionState,
+    pub last_stop_reason: DeskStopReason,
+    pub obstruction_sensitivity: ObstructionSensitivity,
     pub target_active: bool,
     pub target_position: i32,
     pub left_position: i32,
@@ -70,6 +96,13 @@ pub enum DeskError {
     SkewFault,
     RehomeRequired,
     Stopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+pub enum DeskMoveOutcome {
+    Completed,
+    StoppedByRequest,
+    StoppedByObstruction,
 }
 
 pub struct UnhomedDesk;
@@ -120,6 +153,7 @@ enum TravelDirection {
 #[derive(Clone, Copy)]
 struct AxisTargetState {
     at_target: bool,
+    near_target: bool,
     base_duty: u16,
 }
 
@@ -129,6 +163,27 @@ struct MoveSnapshot {
     observed_skew_abs: i32,
     left: AxisTargetState,
     right: AxisTargetState,
+}
+
+#[derive(Clone, Copy)]
+struct ObstructionProfile {
+    minimum_baseline_percent: u32,
+    consecutive_windows: u8,
+}
+
+struct ObstructionMonitor {
+    direction: TravelDirection,
+    profile: ObstructionProfile,
+    move_started_at: Instant,
+    start_left: i32,
+    start_right: i32,
+    max_left_travel: i32,
+    max_right_travel: i32,
+    warmed_up: bool,
+    window_started_at: Instant,
+    window_start_total_travel: i32,
+    baseline_speed: u32,
+    consecutive_slow_windows: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -214,6 +269,61 @@ impl TravelDirection {
             Self::Down => observed_skew < 0,
         }
     }
+
+    fn travel(self, start_position: i32, current_position: i32) -> i32 {
+        match self {
+            Self::Up => (current_position - start_position).max(0),
+            Self::Down => (start_position - current_position).max(0),
+        }
+    }
+}
+
+impl ObstructionSensitivity {
+    const fn profile(self) -> Option<ObstructionProfile> {
+        match self {
+            Self::None => None,
+            Self::Low => Some(ObstructionProfile {
+                minimum_baseline_percent: 55,
+                consecutive_windows: 3,
+            }),
+            Self::Medium => Some(ObstructionProfile {
+                minimum_baseline_percent: 70,
+                consecutive_windows: 2,
+            }),
+            Self::High => Some(ObstructionProfile {
+                minimum_baseline_percent: 80,
+                consecutive_windows: 2,
+            }),
+        }
+    }
+}
+
+const fn obstruction_detection_time_ms(profile: ObstructionProfile) -> u64 {
+    OBSTRUCTION_WARMUP_DURATION_MS
+        + OBSTRUCTION_SAMPLE_WINDOW_MS * profile.consecutive_windows as u64
+}
+
+const fn longest_obstruction_detection_time_ms() -> u64 {
+    let low = obstruction_detection_time_ms_from_sensitivity(ObstructionSensitivity::Low);
+    let medium = obstruction_detection_time_ms_from_sensitivity(ObstructionSensitivity::Medium);
+    let high = obstruction_detection_time_ms_from_sensitivity(ObstructionSensitivity::High);
+
+    if low >= medium && low >= high {
+        low
+    } else if medium >= high {
+        medium
+    } else {
+        high
+    }
+}
+
+const fn obstruction_detection_time_ms_from_sensitivity(
+    sensitivity: ObstructionSensitivity,
+) -> u64 {
+    match sensitivity.profile() {
+        Some(profile) => obstruction_detection_time_ms(profile),
+        None => 0,
+    }
 }
 
 impl MoveSnapshot {
@@ -230,10 +340,12 @@ impl MoveSnapshot {
             observed_skew_abs: (left_position - right_position).abs(),
             left: AxisTargetState {
                 at_target: left_at_target,
+                near_target: left_near,
                 base_duty: axis_base_duty(left_near, left_at_target, right_at_target),
             },
             right: AxisTargetState {
                 at_target: right_at_target,
+                near_target: right_near,
                 base_duty: axis_base_duty(right_near, right_at_target, left_at_target),
             },
         }
@@ -245,6 +357,110 @@ impl MoveSnapshot {
 
     fn is_skew_fault(self) -> bool {
         self.observed_skew_abs > FAULT_SKEW_COUNTS
+    }
+
+    fn suspends_obstruction_detection(self, phase: SyncPhase) -> bool {
+        !matches!(phase, SyncPhase::Balanced) || self.left.near_target || self.right.near_target
+    }
+}
+
+impl ObstructionMonitor {
+    fn new(
+        direction: TravelDirection,
+        started_at: Instant,
+        left_position: i32,
+        right_position: i32,
+    ) -> Option<Self> {
+        let profile = DEFAULT_OBSTRUCTION_SENSITIVITY.profile()?;
+
+        Some(Self {
+            direction,
+            profile,
+            move_started_at: started_at,
+            start_left: left_position,
+            start_right: right_position,
+            max_left_travel: 0,
+            max_right_travel: 0,
+            warmed_up: false,
+            window_started_at: started_at,
+            window_start_total_travel: 0,
+            baseline_speed: 0,
+            consecutive_slow_windows: 0,
+        })
+    }
+
+    fn observe(
+        &mut self,
+        now: Instant,
+        left_position: i32,
+        right_position: i32,
+        snapshot: MoveSnapshot,
+        phase: SyncPhase,
+    ) -> bool {
+        let left_travel = self.direction.travel(self.start_left, left_position);
+        let right_travel = self.direction.travel(self.start_right, right_position);
+        let total_travel = left_travel + right_travel;
+
+        self.max_left_travel = self.max_left_travel.max(left_travel);
+        self.max_right_travel = self.max_right_travel.max(right_travel);
+
+        if snapshot.suspends_obstruction_detection(phase) {
+            self.consecutive_slow_windows = 0;
+            self.restart_window(now, total_travel);
+            return false;
+        }
+
+        if !self.warmed_up {
+            let warmed_up = now.saturating_duration_since(self.move_started_at)
+                >= OBSTRUCTION_WARMUP_DURATION
+                && self.max_left_travel >= OBSTRUCTION_WARMUP_COUNTS
+                && self.max_right_travel >= OBSTRUCTION_WARMUP_COUNTS;
+            if warmed_up {
+                self.warmed_up = true;
+                self.consecutive_slow_windows = 0;
+                self.restart_window(now, total_travel);
+            }
+            return false;
+        }
+
+        let elapsed = now.saturating_duration_since(self.window_started_at);
+        if elapsed < OBSTRUCTION_SAMPLE_WINDOW {
+            return false;
+        }
+
+        let elapsed_ms = elapsed.as_millis();
+        if elapsed_ms == 0 {
+            self.consecutive_slow_windows = 0;
+            self.restart_window(now, total_travel);
+            return false;
+        }
+
+        let window_travel = total_travel.saturating_sub(self.window_start_total_travel);
+        let window_speed = (window_travel as u32).saturating_mul(1_000) / elapsed_ms as u32;
+
+        if self.baseline_speed == 0 || window_speed >= self.baseline_speed {
+            self.baseline_speed = window_speed;
+            self.consecutive_slow_windows = 0;
+        } else {
+            let threshold_speed = self
+                .baseline_speed
+                .saturating_mul(self.profile.minimum_baseline_percent)
+                / 100;
+            if window_speed < threshold_speed {
+                self.consecutive_slow_windows = self.consecutive_slow_windows.saturating_add(1);
+            } else {
+                self.consecutive_slow_windows = 0;
+            }
+        }
+
+        let obstructed = self.consecutive_slow_windows >= self.profile.consecutive_windows;
+        self.restart_window(now, total_travel);
+        obstructed
+    }
+
+    fn restart_window(&mut self, now: Instant, total_travel: i32) {
+        self.window_started_at = now;
+        self.window_start_total_travel = total_travel;
     }
 }
 
@@ -386,6 +602,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             homed: false,
             needs_rehome: true,
             motion: DeskMotionState::Idle,
+            last_stop_reason: DeskStopReason::None,
+            obstruction_sensitivity: DEFAULT_OBSTRUCTION_SENSITIVITY,
             target_active: false,
             target_position: 0,
             left_position,
@@ -433,6 +651,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             status.homed = false;
             status.needs_rehome = true;
             status.motion = DeskMotionState::Idle;
+            status.last_stop_reason = DeskStopReason::None;
             status.target_active = false;
             status.left_min_position = 0;
             status.left_max_position = 0;
@@ -460,6 +679,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             status.motion = DeskMotionState::Homing;
             status.homed = false;
             status.needs_rehome = true;
+            status.last_stop_reason = DeskStopReason::None;
             status.target_active = false;
         });
 
@@ -734,6 +954,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             status.homed = true;
             status.needs_rehome = false;
             status.motion = DeskMotionState::Idle;
+            status.last_stop_reason = DeskStopReason::None;
             status.target_active = false;
             status.left_position = left_status.position;
             status.right_position = right_status.position;
@@ -794,6 +1015,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             status.homed = false;
             status.needs_rehome = true;
             status.motion = DeskMotionState::Idle;
+            status.last_stop_reason = DeskStopReason::None;
             status.target_active = false;
             status.left_min_position = 0;
             status.left_max_position = 0;
@@ -819,11 +1041,12 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         (self.into_unhomed(), error)
     }
 
-    pub fn stop(&mut self) {
+    pub fn stop_with_reason(&mut self, reason: DeskStopReason) {
         self.stop_ready_legs();
         self.update_status(|status| {
             status.motion = DeskMotionState::Idle;
             status.target_active = false;
+            status.last_stop_reason = reason;
         });
     }
 
@@ -832,7 +1055,10 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         target_position: i32,
         stop_requested: StopRequested,
     ) -> Result<
-        Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
+        (
+            Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
+            DeskMoveOutcome,
+        ),
         (
             Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
             DeskError,
@@ -847,23 +1073,24 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         }
 
         if stop_requested() {
-            self.stop();
-            return Ok(self);
+            self.stop_with_reason(DeskStopReason::UserStop);
+            return Ok((self, DeskMoveOutcome::StoppedByRequest));
         }
 
         let shared_target = target_position.clamp(status.min_position, status.max_position);
         if (shared_target - status.average_position).abs() <= DESK_TARGET_TOLERANCE {
-            self.stop();
-            return Ok(self);
+            self.stop_with_reason(DeskStopReason::TargetReached);
+            return Ok((self, DeskMoveOutcome::Completed));
         }
 
         let Some(direction) = TravelDirection::from_target(shared_target, status.average_position)
         else {
-            self.stop();
-            return Ok(self);
+            self.stop_with_reason(DeskStopReason::TargetReached);
+            return Ok((self, DeskMoveOutcome::Completed));
         };
 
         self.update_status(|status| {
+            status.last_stop_reason = DeskStopReason::None;
             status.target_active = true;
             status.target_position = shared_target;
             status.motion = direction.motion_state();
@@ -898,11 +1125,18 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             )
         };
         let mut sync_phase = SyncPhase::Balanced;
+        let move_started_at = Instant::now();
+        let mut obstruction_monitor = ObstructionMonitor::new(
+            direction,
+            move_started_at,
+            left_status.position,
+            right_status.position,
+        );
 
         loop {
             if stop_requested() {
-                self.stop();
-                return Ok(self);
+                self.stop_with_reason(DeskStopReason::UserStop);
+                return Ok((self, DeskMoveOutcome::StoppedByRequest));
             }
 
             match with_deadline(
@@ -923,8 +1157,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 MoveSnapshot::new(shared_target, left_status.position, right_status.position);
 
             if snapshot.is_complete() {
-                self.stop();
-                return Ok(self);
+                self.stop_with_reason(DeskStopReason::TargetReached);
+                return Ok((self, DeskMoveOutcome::Completed));
             }
 
             if snapshot.is_skew_fault() {
@@ -940,6 +1174,19 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 snapshot,
             );
             apply_dual_plan(left_leg, right_leg, plan);
+
+            if obstruction_monitor.as_mut().is_some_and(|monitor| {
+                monitor.observe(
+                    Instant::now(),
+                    left_status.position,
+                    right_status.position,
+                    snapshot,
+                    sync_phase,
+                )
+            }) {
+                self.stop_with_reason(DeskStopReason::Obstruction);
+                return Ok((self, DeskMoveOutcome::StoppedByObstruction));
+            }
         }
     }
 }
