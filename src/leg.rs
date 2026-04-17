@@ -308,7 +308,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
 
         self.apply_drive_mode(DriveMode::UpBoost, runtime_config);
 
-        let startup_steps = steps.min(runtime_config.startup_events().get_u16());
+        let startup_steps = steps.min(runtime_config.startup_events().get());
         let mut steps_taken = 0;
 
         while steps_taken < startup_steps {
@@ -572,7 +572,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
         self.apply_drive_mode(DriveMode::Stop, runtime_config);
         self.move_up_steps(
             up_direction,
-            runtime_config.homing_backoff_steps().get_u16(),
+            runtime_config.homing_backoff_steps().get(),
             runtime_config,
         )
         .await;
@@ -764,7 +764,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         }
 
         let mut steps_taken = 0;
-        let startup_steps = steps.min(runtime_config.startup_events().get_u16());
+        let startup_steps = steps.min(runtime_config.startup_events().get());
 
         if direction == self.state.up_direction {
             self.start_up_boost(runtime_config);
@@ -814,7 +814,8 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         let target_position = self.clamp_target(target_position);
         let current_position = self.logical_position();
 
-        if (target_position - current_position).abs() <= runtime_config.target_tolerance().get() {
+        if (target_position - current_position).abs() <= runtime_config.target_tolerance().get_i32()
+        {
             self.stop();
             return Ok(());
         }
@@ -829,12 +830,12 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                 let error =
                     target_position - self.logical_position_from_raw(event.snapshot.position);
 
-                if error <= runtime_config.target_tolerance().get() {
+                if error <= runtime_config.target_tolerance().get_i32() {
                     self.stop();
                     break;
                 }
 
-                if error <= runtime_config.target_slow_zone().get() {
+                if error <= runtime_config.target_slow_zone().get_i32() {
                     self.start_up_slow(runtime_config);
                 } else {
                     self.drive_up_run(runtime_config);
@@ -855,12 +856,12 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                 let error =
                     self.logical_position_from_raw(event.snapshot.position) - target_position;
 
-                if error <= runtime_config.target_tolerance().get() {
+                if error <= runtime_config.target_tolerance().get_i32() {
                     self.stop();
                     break;
                 }
 
-                if error <= runtime_config.target_slow_zone().get() {
+                if error <= runtime_config.target_slow_zone().get_i32() {
                     self.start_down_slow(runtime_config);
                 } else {
                     self.drive_down_run(runtime_config);

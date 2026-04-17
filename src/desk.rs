@@ -244,10 +244,10 @@ impl MoveSnapshot {
     fn new(config: DeskConfig, target: i32, left_position: i32, right_position: i32) -> Self {
         let left_error = target - left_position;
         let right_error = target - right_position;
-        let left_at_target = left_error.abs() <= config.target_tolerance().get();
-        let right_at_target = right_error.abs() <= config.target_tolerance().get();
-        let left_near = left_error.abs() <= config.target_slow_zone().get();
-        let right_near = right_error.abs() <= config.target_slow_zone().get();
+        let left_at_target = left_error.abs() <= config.target_tolerance().get_i32();
+        let right_at_target = right_error.abs() <= config.target_tolerance().get_i32();
+        let left_near = left_error.abs() <= config.target_slow_zone().get_i32();
+        let right_near = right_error.abs() <= config.target_slow_zone().get_i32();
 
         Self {
             observed_skew: left_position - right_position,
@@ -270,7 +270,7 @@ impl MoveSnapshot {
     }
 
     fn is_skew_fault(self, config: DeskConfig) -> bool {
-        self.observed_skew_abs > config.fault_skew_counts().get()
+        self.observed_skew_abs > config.fault_skew_counts().get_i32()
     }
 
     fn suspends_obstruction_detection(self, phase: SyncPhase) -> bool {
@@ -329,8 +329,8 @@ impl ObstructionMonitor {
         if !self.warmed_up {
             let warmed_up = now.saturating_duration_since(self.move_started_at)
                 >= self.config.obstruction_warmup_duration()
-                && self.max_left_travel >= self.config.obstruction_warmup_counts().get()
-                && self.max_right_travel >= self.config.obstruction_warmup_counts().get();
+                && self.max_left_travel >= self.config.obstruction_warmup_counts().get_i32()
+                && self.max_right_travel >= self.config.obstruction_warmup_counts().get_i32();
             if warmed_up {
                 self.warmed_up = true;
                 self.consecutive_slow_windows = 0;
@@ -360,7 +360,7 @@ impl ObstructionMonitor {
         } else {
             let threshold_speed = self
                 .baseline_speed
-                .saturating_mul(self.profile.minimum_baseline_percent().get())
+                .saturating_mul(self.profile.minimum_baseline_percent().get_u32())
                 / 100;
             if window_speed < threshold_speed {
                 self.consecutive_slow_windows = self.consecutive_slow_windows.saturating_add(1);
@@ -741,7 +741,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             let observed_skew = left_travel - right_travel;
             let homing_skew = observed_skew.abs();
 
-            if homing_skew > desk_config.homing_fault_skew_counts().get() {
+            if homing_skew > desk_config.homing_fault_skew_counts().get_i32() {
                 left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                 right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                 return Err(self.restore_unhomed(left_leg, right_leg, DeskError::SkewFault));
@@ -803,7 +803,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                     }
                 }
 
-                if left_backoff >= desk_config.homing_backoff_steps().get() {
+                if left_backoff >= desk_config.homing_backoff_steps().get_i32() {
                     left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                     left_backoff_done = true;
                 } else if Instant::now().saturating_duration_since(left_backoff_progress_at)
@@ -836,7 +836,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                     }
                 }
 
-                if right_backoff >= desk_config.homing_backoff_steps().get() {
+                if right_backoff >= desk_config.homing_backoff_steps().get_i32() {
                     right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                     right_backoff_done = true;
                 } else if Instant::now().saturating_duration_since(right_backoff_progress_at)
@@ -852,7 +852,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 }
             }
 
-            if (left_backoff - right_backoff).abs() > desk_config.fault_skew_counts().get() {
+            if (left_backoff - right_backoff).abs() > desk_config.fault_skew_counts().get_i32() {
                 left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                 right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                 return Err(self.restore_unhomed(left_leg, right_leg, DeskError::SkewFault));
@@ -1008,7 +1008,9 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 PositionCounts::new(status.max_position),
             )
             .get();
-        if (shared_target - status.average_position).abs() <= desk_config.target_tolerance().get() {
+        if (shared_target - status.average_position).abs()
+            <= desk_config.target_tolerance().get_i32()
+        {
             self.stop_with_reason(DeskStopReason::TargetReached);
             return Ok((self, DeskMoveOutcome::Completed));
         }
@@ -1154,26 +1156,26 @@ fn travel_in_direction(
 fn next_sync_phase(config: DeskConfig, current: SyncPhase, effective_skew_abs: i32) -> SyncPhase {
     match current {
         SyncPhase::Balanced => {
-            if effective_skew_abs >= config.catch_up_enter_counts().get() {
+            if effective_skew_abs >= config.catch_up_enter_counts().get_i32() {
                 SyncPhase::PauseLead
-            } else if effective_skew_abs >= config.sync_speedup_enter_counts().get() {
+            } else if effective_skew_abs >= config.sync_speedup_enter_counts().get_i32() {
                 SyncPhase::SpeedMatch
             } else {
                 SyncPhase::Balanced
             }
         }
         SyncPhase::SpeedMatch => {
-            if effective_skew_abs >= config.catch_up_enter_counts().get() {
+            if effective_skew_abs >= config.catch_up_enter_counts().get_i32() {
                 SyncPhase::PauseLead
-            } else if effective_skew_abs <= config.sync_speedup_exit_counts().get() {
+            } else if effective_skew_abs <= config.sync_speedup_exit_counts().get_i32() {
                 SyncPhase::Balanced
             } else {
                 SyncPhase::SpeedMatch
             }
         }
         SyncPhase::PauseLead => {
-            if effective_skew_abs <= config.catch_up_exit_counts().get() {
-                if effective_skew_abs >= config.sync_speedup_enter_counts().get() {
+            if effective_skew_abs <= config.catch_up_exit_counts().get_i32() {
+                if effective_skew_abs >= config.sync_speedup_enter_counts().get_i32() {
                     SyncPhase::SpeedMatch
                 } else {
                     SyncPhase::Balanced
@@ -1201,7 +1203,7 @@ fn axis_base_duty(
 }
 
 fn clamp_duty(base: DutyPercent, trim: DutyPercentTrim) -> DutyPercent {
-    DutyPercent::from_clamped_i32(base.get() as i32 + trim.get())
+    DutyPercent::from_clamped_i32(base.get() as i32 + trim.get_i32())
 }
 
 fn clamp_drive_duty(config: DeskConfig, base: DutyPercent, trim: DutyPercentTrim) -> DutyPercent {
@@ -1211,7 +1213,7 @@ fn clamp_drive_duty(config: DeskConfig, base: DutyPercent, trim: DutyPercentTrim
 fn sync_trim(phase: SyncPhase, is_leader: bool, step: DutyPercentTrim) -> DutyPercentTrim {
     match phase {
         SyncPhase::Balanced => DutyPercentTrim::new(0),
-        SyncPhase::SpeedMatch if is_leader => DutyPercentTrim::new(-(step.get() as i8)),
+        SyncPhase::SpeedMatch if is_leader => DutyPercentTrim::new(-step.get()),
         SyncPhase::SpeedMatch => step,
         SyncPhase::PauseLead if is_leader => DutyPercentTrim::new(0),
         SyncPhase::PauseLead => step,

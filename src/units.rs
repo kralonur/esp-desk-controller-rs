@@ -49,13 +49,12 @@ impl CountDelta {
     pub const fn new(value: u16) -> Self {
         Self(value)
     }
-
-    pub const fn get(self) -> i32 {
-        self.0 as i32
+    pub const fn get(self) -> u16 {
+        self.0
     }
 
-    pub const fn get_u16(self) -> u16 {
-        self.0
+    pub const fn get_i32(self) -> i32 {
+        self.0 as i32
     }
 }
 
@@ -81,7 +80,11 @@ impl DutyPercent {
         Self(clamped)
     }
 
-    pub const fn get(self) -> u16 {
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+
+    pub const fn get_u16(self) -> u16 {
         self.0 as u16
     }
 
@@ -107,7 +110,11 @@ impl DutyPercentTrim {
         Self(value)
     }
 
-    pub const fn get(self) -> i32 {
+    pub const fn get(self) -> i8 {
+        self.0
+    }
+
+    pub const fn get_i32(self) -> i32 {
         self.0 as i32
     }
 }
@@ -121,7 +128,11 @@ impl Percent {
         Self(value)
     }
 
-    pub const fn get(self) -> u32 {
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+
+    pub const fn get_u32(self) -> u32 {
         self.0 as u32
     }
 }
