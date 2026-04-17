@@ -379,16 +379,8 @@ async fn main(spawner: Spawner) -> ! {
             desk.status_reader(),
             runtime_config_reader,
         ));
-
-    let web_app = esp_pwm_motor::web::WebApp::new(control_state);
-    for id in 0..esp_pwm_motor::web::WEB_TASK_POOL_SIZE {
-        spawner.must_spawn(esp_pwm_motor::web::web_task(
-            id,
-            stack,
-            web_app.router,
-            web_app.config,
-        ));
-    }
+    let mqtt_status_watcher = desk.status_watcher();
+    esp_pwm_motor::mqtt::spawn_mqtt(&spawner, stack, control_state, mqtt_status_watcher);
 
     run_desk_control(control_state, DeskRuntime::Unhomed(desk)).await
 }
