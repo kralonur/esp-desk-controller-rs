@@ -20,13 +20,13 @@ use rust_mqtt::{
 };
 
 use crate::{
-    config::ObstructionSensitivity,
+    config::{ConfigError, ObstructionProfileConfig, ObstructionSensitivity, RuntimeConfigState},
     controller::{
         CommandSubmission, DeskControllerMode, DeskControllerSnapshot, DeskControllerState,
         DeskFault, StopSubmission,
     },
     desk::{DeskMotionState, DeskStatusWatcher, DeskStopReason},
-    units::{PositionCounts, RelativeCounts},
+    units::{CountDelta, DutyPercent, DutyPercentTrim, Percent, PositionCounts, RelativeCounts},
 };
 
 const MQTT_BROKER_ADDR: Option<&str> = option_env!("MQTT_BROKER_ADDR");
@@ -39,7 +39,7 @@ const MQTT_KEEP_ALIVE_SECS: Option<&str> = option_env!("MQTT_KEEP_ALIVE_SECS");
 const MQTT_RECONNECT_DELAY_SECS: Option<&str> = option_env!("MQTT_RECONNECT_DELAY_SECS");
 
 const MQTT_TCP_BUFFER_SIZE: usize = 2048;
-const MQTT_MAX_SUBSCRIBES: usize = 8;
+const MQTT_MAX_SUBSCRIBES: usize = 12;
 const MQTT_RECEIVE_MAXIMUM: usize = 8;
 const MQTT_SEND_MAXIMUM: usize = 8;
 const MQTT_MAX_SUBSCRIPTION_IDENTIFIERS: usize = 4;
@@ -60,6 +60,10 @@ struct MqttSettings {
     publisher_client_id: String,
     topic_status: String,
     topic_response: String,
+    topic_config: String,
+    topic_config_get: String,
+    topic_config_reset: String,
+    topic_config_set_all: String,
     topic_home: String,
     topic_stop: String,
     topic_up: String,
@@ -77,6 +81,20 @@ pub enum MqttSetupError {
     InvalidBrokerPort,
     InvalidKeepAlive,
     InvalidReconnectDelay,
+}
+
+#[derive(Clone, Copy)]
+enum IncomingTopic<'a> {
+    Command(CommandTopic),
+    ConfigGet,
+    ConfigReset,
+    ConfigSet(&'a str),
+}
+
+struct IncomingResponse {
+    response: String,
+    publish_status: bool,
+    publish_config: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -142,6 +160,7 @@ type MqttClient<'a> = Client<
 pub async fn mqtt_task(
     stack: Stack<'static>,
     state: &'static DeskControllerState,
+    runtime_config_state: &'static RuntimeConfigState,
     mut status_watcher: DeskStatusWatcher,
 ) -> ! {
     let settings = match MqttSettings::load() {
@@ -155,7 +174,14 @@ pub async fn mqtt_task(
     };
 
     loop {
-        run_mqtt_session(stack, state, &mut status_watcher, &settings).await;
+        run_mqtt_session(
+            stack,
+            state,
+            runtime_config_state,
+            &mut status_watcher,
+            &settings,
+        )
+        .await;
         Timer::after(settings.reconnect_delay).await;
     }
 }
@@ -163,6 +189,7 @@ pub async fn mqtt_task(
 async fn run_mqtt_session(
     stack: Stack<'static>,
     state: &'static DeskControllerState,
+    runtime_config_state: &'static RuntimeConfigState,
     status_watcher: &mut DeskStatusWatcher,
     settings: &MqttSettings,
 ) {
@@ -250,6 +277,11 @@ async fn run_mqtt_session(
         warn!("mqtt initial status publish failed: {:?}", error);
         return;
     }
+    if let Err(error) = publish_config(&mut publisher_client, settings, runtime_config_state).await
+    {
+        warn!("mqtt initial config publish failed: {:?}", error);
+        return;
+    }
 
     loop {
         match select3(
@@ -268,16 +300,28 @@ async fn run_mqtt_session(
                     }
                 };
 
-                if let Some(response) = decode_command_event(state, event) {
+                if let Some(response) =
+                    decode_command_event(state, runtime_config_state, settings, event)
+                {
                     if let Err(error) =
-                        publish_response(&mut publisher_client, settings, &response).await
+                        publish_response(&mut publisher_client, settings, &response.response).await
                     {
                         warn!("mqtt response publish failed: {:?}", error);
                         return;
                     }
-                    if let Err(error) = publish_status(&mut publisher_client, settings, state).await
+                    if response.publish_status
+                        && let Err(error) =
+                            publish_status(&mut publisher_client, settings, state).await
                     {
                         warn!("mqtt status publish failed: {:?}", error);
+                        return;
+                    }
+                    if response.publish_config
+                        && let Err(error) =
+                            publish_config(&mut publisher_client, settings, runtime_config_state)
+                                .await
+                    {
+                        warn!("mqtt config publish failed: {:?}", error);
                         return;
                     }
                 }
@@ -329,6 +373,15 @@ async fn subscribe_commands<'a>(
             .subscribe(settings.command_topic_filter(command)?, subscription)
             .await?;
     }
+    client
+        .subscribe(settings.config_get_topic_filter()?, subscription)
+        .await?;
+    client
+        .subscribe(settings.config_reset_topic_filter()?, subscription)
+        .await?;
+    client
+        .subscribe(settings.config_set_topic_filter()?, subscription)
+        .await?;
     Ok(())
 }
 
@@ -353,6 +406,19 @@ async fn publish_response<'a>(
     publish_message(client, settings.response_topic_name()?, response).await
 }
 
+async fn publish_config<'a>(
+    client: &mut MqttClient<'a>,
+    settings: &MqttSettings,
+    runtime_config_state: &RuntimeConfigState,
+) -> Result<(), MqttError<'a>> {
+    publish_message(
+        client,
+        settings.config_topic_name()?,
+        &config_response(runtime_config_state),
+    )
+    .await
+}
+
 async fn publish_message<'a>(
     client: &mut MqttClient<'a>,
     topic: TopicName<'_>,
@@ -365,8 +431,10 @@ async fn publish_message<'a>(
 
 fn decode_command_event(
     state: &DeskControllerState,
+    runtime_config_state: &RuntimeConfigState,
+    settings: &MqttSettings,
     event: Event<'_, MQTT_MAX_SUBSCRIPTION_IDENTIFIERS>,
-) -> Option<String> {
+) -> Option<IncomingResponse> {
     let publish = match event {
         Event::Publish(publish) => publish,
         _ => return None,
@@ -374,11 +442,59 @@ fn decode_command_event(
 
     let topic = publish.topic.as_ref().as_str();
     let payload = core::str::from_utf8(publish.message.as_ref()).ok()?.trim();
-    let command = CommandTopic::parse(topic)?;
-    Some(handle_command(state, command, payload))
+    let incoming = settings.parse_incoming_topic(topic)?;
+    Some(handle_incoming_topic(
+        state,
+        runtime_config_state,
+        incoming,
+        payload,
+    ))
 }
 
-fn handle_command(state: &DeskControllerState, topic: CommandTopic, payload: &str) -> String {
+fn handle_incoming_topic(
+    state: &DeskControllerState,
+    runtime_config_state: &RuntimeConfigState,
+    topic: IncomingTopic<'_>,
+    payload: &str,
+) -> IncomingResponse {
+    match topic {
+        IncomingTopic::Command(command) => IncomingResponse {
+            response: handle_motion_command(state, command, payload),
+            publish_status: true,
+            publish_config: false,
+        },
+        IncomingTopic::ConfigGet => IncomingResponse {
+            response: config_command_response("get", "published"),
+            publish_status: false,
+            publish_config: true,
+        },
+        IncomingTopic::ConfigReset => {
+            let result = runtime_config_state.replace(Default::default());
+            IncomingResponse {
+                response: match result {
+                    Ok(_) => config_command_response("reset", "updated"),
+                    Err(error) => config_command_error_response("reset", config_error_name(error)),
+                },
+                publish_status: true,
+                publish_config: result.is_ok(),
+            }
+        }
+        IncomingTopic::ConfigSet(field_path) => {
+            let result = handle_config_set(runtime_config_state, field_path, payload);
+            IncomingResponse {
+                response: config_set_response(field_path, result),
+                publish_status: result.is_ok(),
+                publish_config: result.is_ok(),
+            }
+        }
+    }
+}
+
+fn handle_motion_command(
+    state: &DeskControllerState,
+    topic: CommandTopic,
+    payload: &str,
+) -> String {
     match topic {
         CommandTopic::Home => {
             submission_response(topic.response_name(), state.submit_home(), state.snapshot())
@@ -486,6 +602,452 @@ fn response_body(
     )
 }
 
+fn config_response(runtime_config_state: &RuntimeConfigState) -> String {
+    let config = runtime_config_state.current();
+    let desk = config.desk();
+    let leg = config.leg();
+    let low_profile = desk
+        .obstruction_profile(ObstructionSensitivity::Low)
+        .expect("low obstruction profile must exist");
+    let medium_profile = desk
+        .obstruction_profile(ObstructionSensitivity::Medium)
+        .expect("medium obstruction profile must exist");
+    let high_profile = desk
+        .obstruction_profile(ObstructionSensitivity::High)
+        .expect("high obstruction profile must exist");
+
+    format!(
+        "desk.target_tolerance={}\n\
+desk.target_slow_zone={}\n\
+desk.move_timeout_ms={}\n\
+desk.obstruction_sample_window_ms={}\n\
+desk.obstruction_warmup_duration_ms={}\n\
+desk.obstruction_warmup_counts={}\n\
+desk.min_move_duty={}\n\
+desk.move_run_duty={}\n\
+desk.move_slow_duty={}\n\
+desk.move_sync_duty_step={}\n\
+desk.homing_poll_interval_ms={}\n\
+desk.homing_start_timeout_ms={}\n\
+desk.homing_stall_timeout_ms={}\n\
+desk.homing_backoff_steps={}\n\
+desk.homing_run_duty={}\n\
+desk.homing_sync_duty_step={}\n\
+desk.sync_speedup_enter_counts={}\n\
+desk.sync_speedup_exit_counts={}\n\
+desk.catch_up_enter_counts={}\n\
+desk.catch_up_exit_counts={}\n\
+desk.fault_skew_counts={}\n\
+desk.homing_fault_skew_counts={}\n\
+desk.obstruction_sensitivity={}\n\
+desk.low_obstruction_min_percent={}\n\
+desk.low_obstruction_windows={}\n\
+desk.medium_obstruction_min_percent={}\n\
+desk.medium_obstruction_windows={}\n\
+desk.high_obstruction_min_percent={}\n\
+desk.high_obstruction_windows={}\n\
+leg.startup_duty={}\n\
+leg.max_duty={}\n\
+leg.run_duty={}\n\
+leg.slow_duty={}\n\
+leg.homing_duty={}\n\
+leg.startup_events={}\n\
+leg.homing_start_timeout_ms={}\n\
+leg.homing_stall_timeout_ms={}\n\
+leg.homing_poll_interval_ms={}\n\
+leg.homing_backoff_steps={}\n\
+leg.default_max_position={}\n\
+leg.move_stall_timeout_ms={}\n\
+leg.target_slow_zone={}\n\
+leg.target_tolerance={}\n",
+        desk.target_tolerance().get(),
+        desk.target_slow_zone().get(),
+        desk.move_timeout().as_millis(),
+        desk.obstruction_sample_window().as_millis(),
+        desk.obstruction_warmup_duration().as_millis(),
+        desk.obstruction_warmup_counts().get(),
+        desk.min_move_duty().get(),
+        desk.move_run_duty().get(),
+        desk.move_slow_duty().get(),
+        desk.move_sync_duty_step().get(),
+        desk.homing_poll_interval().as_millis(),
+        desk.homing_start_timeout().as_millis(),
+        desk.homing_stall_timeout().as_millis(),
+        desk.homing_backoff_steps().get(),
+        desk.homing_run_duty().get(),
+        desk.homing_sync_duty_step().get(),
+        desk.sync_speedup_enter_counts().get(),
+        desk.sync_speedup_exit_counts().get(),
+        desk.catch_up_enter_counts().get(),
+        desk.catch_up_exit_counts().get(),
+        desk.fault_skew_counts().get(),
+        desk.homing_fault_skew_counts().get(),
+        obstruction_sensitivity_name(desk.obstruction_sensitivity()),
+        low_profile.minimum_baseline_percent().get(),
+        low_profile.consecutive_windows(),
+        medium_profile.minimum_baseline_percent().get(),
+        medium_profile.consecutive_windows(),
+        high_profile.minimum_baseline_percent().get(),
+        high_profile.consecutive_windows(),
+        leg.startup_duty().get(),
+        leg.max_duty().get(),
+        leg.run_duty().get(),
+        leg.slow_duty().get(),
+        leg.homing_duty().get(),
+        leg.startup_events().get(),
+        leg.homing_start_timeout().as_millis(),
+        leg.homing_stall_timeout().as_millis(),
+        leg.homing_poll_interval().as_millis(),
+        leg.homing_backoff_steps().get(),
+        leg.default_max_position().get(),
+        leg.move_stall_timeout().as_millis(),
+        leg.target_slow_zone().get(),
+        leg.target_tolerance().get(),
+    )
+}
+
+fn config_command_response(command: &'static str, result: &'static str) -> String {
+    format!("command=config_{}\nresult={}\n", command, result)
+}
+
+fn config_command_error_response(command: &'static str, result: &'static str) -> String {
+    config_command_response(command, result)
+}
+
+fn config_set_response(field_path: &str, result: Result<(), &'static str>) -> String {
+    let result_name = match result {
+        Ok(()) => "updated",
+        Err(error) => error,
+    };
+
+    format!(
+        "command=config_set\nfield={}\nresult={}\napplies_on_next_command=true\n",
+        field_path, result_name
+    )
+}
+
+fn handle_config_set(
+    runtime_config_state: &RuntimeConfigState,
+    field_path: &str,
+    payload: &str,
+) -> Result<(), &'static str> {
+    match field_path {
+        "desk/target_tolerance" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_target_tolerance(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/target_slow_zone" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_target_slow_zone(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/move_timeout_ms" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_move_timeout(parse_duration_ms(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/obstruction_sample_window_ms" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_obstruction_sample_window(parse_duration_ms(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/obstruction_warmup_duration_ms" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_obstruction_warmup_duration(parse_duration_ms(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/obstruction_warmup_counts" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_obstruction_warmup_counts(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/min_move_duty" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_min_move_duty(parse_duty_percent(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/move_run_duty" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_move_run_duty(parse_duty_percent(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/move_slow_duty" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_move_slow_duty(parse_duty_percent(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/move_sync_duty_step" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_move_sync_duty_step(parse_duty_trim(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/homing_poll_interval_ms" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_homing_poll_interval(parse_duration_ms(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/homing_start_timeout_ms" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_homing_start_timeout(parse_duration_ms(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/homing_stall_timeout_ms" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_homing_stall_timeout(parse_duration_ms(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/homing_backoff_steps" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_homing_backoff_steps(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/homing_run_duty" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_homing_run_duty(parse_duty_percent(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/homing_sync_duty_step" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_homing_sync_duty_step(parse_duty_trim(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/sync_speedup_enter_counts" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_sync_speedup_enter_counts(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/sync_speedup_exit_counts" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_sync_speedup_exit_counts(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/catch_up_enter_counts" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_catch_up_enter_counts(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/catch_up_exit_counts" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_catch_up_exit_counts(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/fault_skew_counts" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_fault_skew_counts(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/homing_fault_skew_counts" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_homing_fault_skew_counts(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/obstruction_sensitivity" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_obstruction_sensitivity(parse_obstruction_sensitivity(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/low_obstruction_min_percent" => update_obstruction_profile(
+            runtime_config_state,
+            ObstructionSensitivity::Low,
+            payload,
+            true,
+        ),
+        "desk/low_obstruction_windows" => update_obstruction_profile(
+            runtime_config_state,
+            ObstructionSensitivity::Low,
+            payload,
+            false,
+        ),
+        "desk/medium_obstruction_min_percent" => update_obstruction_profile(
+            runtime_config_state,
+            ObstructionSensitivity::Medium,
+            payload,
+            true,
+        ),
+        "desk/medium_obstruction_windows" => update_obstruction_profile(
+            runtime_config_state,
+            ObstructionSensitivity::Medium,
+            payload,
+            false,
+        ),
+        "desk/high_obstruction_min_percent" => update_obstruction_profile(
+            runtime_config_state,
+            ObstructionSensitivity::High,
+            payload,
+            true,
+        ),
+        "desk/high_obstruction_windows" => update_obstruction_profile(
+            runtime_config_state,
+            ObstructionSensitivity::High,
+            payload,
+            false,
+        ),
+        "leg/startup_duty" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_startup_duty(parse_duty_percent(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/max_duty" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_max_duty(parse_duty_percent(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/run_duty" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_run_duty(parse_duty_percent(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/slow_duty" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_slow_duty(parse_duty_percent(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/homing_duty" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_homing_duty(parse_duty_percent(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/startup_events" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_startup_events(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/homing_start_timeout_ms" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_homing_start_timeout(parse_duration_ms(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/homing_stall_timeout_ms" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_homing_stall_timeout(parse_duration_ms(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/homing_poll_interval_ms" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_homing_poll_interval(parse_duration_ms(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/homing_backoff_steps" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_homing_backoff_steps(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/default_max_position" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_default_max_position(parse_position_counts(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/move_stall_timeout_ms" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_move_stall_timeout(parse_duration_ms(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/target_slow_zone" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_target_slow_zone(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        "leg/target_tolerance" => apply_leg_update(runtime_config_state, |leg| {
+            leg.set_target_tolerance(parse_count_delta(payload)?)
+                .map_err(config_error_name)
+        }),
+        _ => Err("unknown_field"),
+    }
+}
+
+fn update_obstruction_profile(
+    runtime_config_state: &RuntimeConfigState,
+    sensitivity: ObstructionSensitivity,
+    payload: &str,
+    update_percent: bool,
+) -> Result<(), &'static str> {
+    apply_desk_update(runtime_config_state, |desk| {
+        let mut profile = desk
+            .obstruction_profile(sensitivity)
+            .ok_or(config_error_name(ConfigError::InvalidDeskConfig))?;
+        if update_percent {
+            profile = ObstructionProfileConfig::new(
+                parse_percent(payload)?,
+                profile.consecutive_windows(),
+            );
+        } else {
+            profile = ObstructionProfileConfig::new(
+                profile.minimum_baseline_percent(),
+                parse_windows(payload)?,
+            );
+        }
+
+        match sensitivity {
+            ObstructionSensitivity::Low => desk
+                .set_low_obstruction_profile(profile)
+                .map_err(config_error_name),
+            ObstructionSensitivity::Medium => desk
+                .set_medium_obstruction_profile(profile)
+                .map_err(config_error_name),
+            ObstructionSensitivity::High => desk
+                .set_high_obstruction_profile(profile)
+                .map_err(config_error_name),
+            ObstructionSensitivity::None => Err(config_error_name(ConfigError::InvalidDeskConfig)),
+        }
+    })
+}
+
+fn apply_desk_update(
+    runtime_config_state: &RuntimeConfigState,
+    update_fn: impl FnOnce(&mut crate::config::DeskConfig) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    apply_runtime_update(runtime_config_state, |config| config.update_desk(update_fn))
+}
+
+fn apply_leg_update(
+    runtime_config_state: &RuntimeConfigState,
+    update_fn: impl FnOnce(&mut crate::config::LegRuntimeConfig) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    apply_runtime_update(runtime_config_state, |config| config.update_leg(update_fn))
+}
+
+fn apply_runtime_update(
+    runtime_config_state: &RuntimeConfigState,
+    update_fn: impl FnOnce(&mut crate::config::RuntimeConfig) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    let mut inner_result = Ok(());
+    let state_result = runtime_config_state.update(|config| {
+        inner_result = update_fn(config);
+    });
+
+    match inner_result {
+        Ok(()) => state_result.map(|_| ()).map_err(config_error_name),
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_position_counts(value: &str) -> Result<PositionCounts, &'static str> {
+    parse_i32(value)
+        .map(PositionCounts::new)
+        .ok_or("invalid_payload")
+}
+
+fn parse_count_delta(value: &str) -> Result<CountDelta, &'static str> {
+    match u16::from_str(value) {
+        Ok(value) => Ok(CountDelta::new(value)),
+        Err(_) => Err("invalid_payload"),
+    }
+}
+
+fn parse_duty_percent(value: &str) -> Result<DutyPercent, &'static str> {
+    match u8::from_str(value) {
+        Ok(value) if value <= DutyPercent::MAX => Ok(DutyPercent::new(value)),
+        _ => Err("invalid_payload"),
+    }
+}
+
+fn parse_duty_trim(value: &str) -> Result<DutyPercentTrim, &'static str> {
+    i8::from_str(value)
+        .map(DutyPercentTrim::new)
+        .map_err(|_| "invalid_payload")
+}
+
+fn parse_duration_ms(value: &str) -> Result<Duration, &'static str> {
+    u64::from_str(value)
+        .map(Duration::from_millis)
+        .map_err(|_| "invalid_payload")
+}
+
+fn parse_percent(value: &str) -> Result<Percent, &'static str> {
+    match u8::from_str(value) {
+        Ok(value) if value <= 100 => Ok(Percent::new(value)),
+        _ => Err("invalid_payload"),
+    }
+}
+
+fn parse_windows(value: &str) -> Result<u8, &'static str> {
+    match u8::from_str(value) {
+        Ok(0) | Err(_) => Err("invalid_payload"),
+        Ok(value) => Ok(value),
+    }
+}
+
+fn parse_obstruction_sensitivity(value: &str) -> Result<ObstructionSensitivity, &'static str> {
+    match value {
+        "none" => Ok(ObstructionSensitivity::None),
+        "low" => Ok(ObstructionSensitivity::Low),
+        "medium" => Ok(ObstructionSensitivity::Medium),
+        "high" => Ok(ObstructionSensitivity::High),
+        _ => Err("invalid_payload"),
+    }
+}
+
+fn config_error_name(error: ConfigError) -> &'static str {
+    match error {
+        ConfigError::InvalidDeskConfig => "invalid_config",
+    }
+}
+
 fn controller_mode_name(mode: DeskControllerMode) -> &'static str {
     match mode {
         DeskControllerMode::Unhomed => "unhomed",
@@ -582,6 +1144,10 @@ impl MqttSettings {
             publisher_client_id: format!("{client_id}-pub"),
             topic_status: format!("{topic_prefix}/status"),
             topic_response: format!("{topic_prefix}/response"),
+            topic_config: format!("{topic_prefix}/config"),
+            topic_config_get: format!("{topic_prefix}/config/get"),
+            topic_config_reset: format!("{topic_prefix}/config/reset"),
+            topic_config_set_all: format!("{topic_prefix}/config/set/#"),
             topic_home: format!("{topic_prefix}/{}", CommandTopic::Home.suffix()),
             topic_stop: format!("{topic_prefix}/{}", CommandTopic::Stop.suffix()),
             topic_up: format!("{topic_prefix}/{}", CommandTopic::Up.suffix()),
@@ -627,6 +1193,10 @@ impl MqttSettings {
         topic_name(&self.topic_response)
     }
 
+    fn config_topic_name(&self) -> Result<TopicName<'_>, MqttError<'static>> {
+        topic_name(&self.topic_config)
+    }
+
     fn command_topic_filter(
         &self,
         command: CommandTopic,
@@ -641,6 +1211,36 @@ impl MqttSettings {
         };
 
         topic_name(topic).map(Into::into)
+    }
+
+    fn config_get_topic_filter(&self) -> Result<TopicFilter<'_>, MqttError<'static>> {
+        topic_name(&self.topic_config_get).map(Into::into)
+    }
+
+    fn config_reset_topic_filter(&self) -> Result<TopicFilter<'_>, MqttError<'static>> {
+        topic_name(&self.topic_config_reset).map(Into::into)
+    }
+
+    fn config_set_topic_filter(&self) -> Result<TopicFilter<'_>, MqttError<'static>> {
+        topic_filter(&self.topic_config_set_all)
+    }
+
+    fn parse_incoming_topic<'a>(&'a self, topic: &'a str) -> Option<IncomingTopic<'a>> {
+        if let Some(command) = CommandTopic::parse(topic) {
+            return Some(IncomingTopic::Command(command));
+        }
+
+        if topic == self.topic_config_get {
+            return Some(IncomingTopic::ConfigGet);
+        }
+
+        if topic == self.topic_config_reset {
+            return Some(IncomingTopic::ConfigReset);
+        }
+
+        topic
+            .strip_prefix(self.topic_config_set_all.strip_suffix('#')?)
+            .map(IncomingTopic::ConfigSet)
     }
 }
 
@@ -695,6 +1295,11 @@ fn topic_name(value: &str) -> Result<TopicName<'_>, MqttError<'static>> {
     Ok(TopicName::new_unchecked(string))
 }
 
+fn topic_filter(value: &str) -> Result<TopicFilter<'_>, MqttError<'static>> {
+    let string = mqtt_string(value)?;
+    TopicFilter::new(string).ok_or(MqttError::Alloc)
+}
+
 fn duration_to_keep_alive(duration: Duration) -> KeepAlive {
     match u16::try_from(duration.as_secs()) {
         Ok(0) | Err(_) => KeepAlive::Infinite,
@@ -708,7 +1313,13 @@ pub fn spawn_mqtt(
     spawner: &Spawner,
     stack: Stack<'static>,
     state: &'static DeskControllerState,
+    runtime_config_state: &'static RuntimeConfigState,
     status_watcher: DeskStatusWatcher,
 ) {
-    spawner.must_spawn(mqtt_task(stack, state, status_watcher));
+    spawner.must_spawn(mqtt_task(
+        stack,
+        state,
+        runtime_config_state,
+        status_watcher,
+    ));
 }

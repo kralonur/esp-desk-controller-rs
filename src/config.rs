@@ -184,6 +184,17 @@ impl DeskConfig {
         self.move_timeout.as_millis() > default_obstruction_detection_time_ms(self)
     }
 
+    fn update_checked(&mut self, update_fn: impl FnOnce(&mut Self)) -> Result<(), ConfigError> {
+        let previous = *self;
+        update_fn(self);
+        if self.is_valid() {
+            Ok(())
+        } else {
+            *self = previous;
+            Err(ConfigError::InvalidDeskConfig)
+        }
+    }
+
     pub const fn target_tolerance(self) -> CountDelta {
         self.target_tolerance
     }
@@ -264,93 +275,120 @@ impl DeskConfig {
         }
     }
 
+    pub fn set_target_tolerance(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.target_tolerance = value)
+    }
+
+    pub fn set_target_slow_zone(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.target_slow_zone = value)
+    }
+
     pub fn set_move_timeout(&mut self, value: Duration) -> Result<(), ConfigError> {
-        let previous = self.move_timeout;
-        self.move_timeout = value;
-        if self.is_valid() {
-            Ok(())
-        } else {
-            self.move_timeout = previous;
-            Err(ConfigError::InvalidDeskConfig)
-        }
+        self.update_checked(|config| config.move_timeout = value)
     }
 
     pub fn set_obstruction_sample_window(&mut self, value: Duration) -> Result<(), ConfigError> {
-        let previous = self.obstruction_sample_window;
-        self.obstruction_sample_window = value;
-        if self.is_valid() {
-            Ok(())
-        } else {
-            self.obstruction_sample_window = previous;
-            Err(ConfigError::InvalidDeskConfig)
-        }
+        self.update_checked(|config| config.obstruction_sample_window = value)
     }
 
     pub fn set_obstruction_warmup_duration(&mut self, value: Duration) -> Result<(), ConfigError> {
-        let previous = self.obstruction_warmup_duration;
-        self.obstruction_warmup_duration = value;
-        if self.is_valid() {
-            Ok(())
-        } else {
-            self.obstruction_warmup_duration = previous;
-            Err(ConfigError::InvalidDeskConfig)
-        }
+        self.update_checked(|config| config.obstruction_warmup_duration = value)
+    }
+
+    pub fn set_obstruction_warmup_counts(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.obstruction_warmup_counts = value)
+    }
+
+    pub fn set_min_move_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.min_move_duty = value)
+    }
+
+    pub fn set_move_run_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.move_run_duty = value)
+    }
+
+    pub fn set_move_slow_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.move_slow_duty = value)
+    }
+
+    pub fn set_move_sync_duty_step(&mut self, value: DutyPercentTrim) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.move_sync_duty_step = value)
+    }
+
+    pub fn set_homing_poll_interval(&mut self, value: Duration) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.homing_poll_interval = value)
+    }
+
+    pub fn set_homing_start_timeout(&mut self, value: Duration) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.homing_start_timeout = value)
+    }
+
+    pub fn set_homing_stall_timeout(&mut self, value: Duration) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.homing_stall_timeout = value)
+    }
+
+    pub fn set_homing_backoff_steps(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.homing_backoff_steps = value)
+    }
+
+    pub fn set_homing_run_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.homing_run_duty = value)
+    }
+
+    pub fn set_homing_sync_duty_step(&mut self, value: DutyPercentTrim) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.homing_sync_duty_step = value)
+    }
+
+    pub fn set_sync_speedup_enter_counts(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.sync_speedup_enter_counts = value)
+    }
+
+    pub fn set_sync_speedup_exit_counts(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.sync_speedup_exit_counts = value)
+    }
+
+    pub fn set_catch_up_enter_counts(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.catch_up_enter_counts = value)
+    }
+
+    pub fn set_catch_up_exit_counts(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.catch_up_exit_counts = value)
+    }
+
+    pub fn set_fault_skew_counts(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.fault_skew_counts = value)
+    }
+
+    pub fn set_homing_fault_skew_counts(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.homing_fault_skew_counts = value)
     }
 
     pub fn set_obstruction_sensitivity(
         &mut self,
         value: ObstructionSensitivity,
     ) -> Result<(), ConfigError> {
-        let previous = self.obstruction_sensitivity;
-        self.obstruction_sensitivity = value;
-        if self.is_valid() {
-            Ok(())
-        } else {
-            self.obstruction_sensitivity = previous;
-            Err(ConfigError::InvalidDeskConfig)
-        }
+        self.update_checked(|config| config.obstruction_sensitivity = value)
     }
 
     pub fn set_low_obstruction_profile(
         &mut self,
         value: ObstructionProfileConfig,
     ) -> Result<(), ConfigError> {
-        let previous = self.low_obstruction_profile;
-        self.low_obstruction_profile = value;
-        if self.is_valid() {
-            Ok(())
-        } else {
-            self.low_obstruction_profile = previous;
-            Err(ConfigError::InvalidDeskConfig)
-        }
+        self.update_checked(|config| config.low_obstruction_profile = value)
     }
 
     pub fn set_medium_obstruction_profile(
         &mut self,
         value: ObstructionProfileConfig,
     ) -> Result<(), ConfigError> {
-        let previous = self.medium_obstruction_profile;
-        self.medium_obstruction_profile = value;
-        if self.is_valid() {
-            Ok(())
-        } else {
-            self.medium_obstruction_profile = previous;
-            Err(ConfigError::InvalidDeskConfig)
-        }
+        self.update_checked(|config| config.medium_obstruction_profile = value)
     }
 
     pub fn set_high_obstruction_profile(
         &mut self,
         value: ObstructionProfileConfig,
     ) -> Result<(), ConfigError> {
-        let previous = self.high_obstruction_profile;
-        self.high_obstruction_profile = value;
-        if self.is_valid() {
-            Ok(())
-        } else {
-            self.high_obstruction_profile = previous;
-            Err(ConfigError::InvalidDeskConfig)
-        }
+        self.update_checked(|config| config.high_obstruction_profile = value)
     }
 
     pub fn move_timeout(self) -> Duration {
@@ -460,6 +498,11 @@ impl LegRuntimeConfig {
         }
     }
 
+    fn update(&mut self, update_fn: impl FnOnce(&mut Self)) -> Result<(), ConfigError> {
+        update_fn(self);
+        Ok(())
+    }
+
     pub const fn startup_duty(self) -> DutyPercent {
         self.startup_duty
     }
@@ -515,6 +558,62 @@ impl LegRuntimeConfig {
     pub const fn target_tolerance(self) -> CountDelta {
         self.target_tolerance
     }
+
+    pub fn set_startup_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
+        self.update(|config| config.startup_duty = value)
+    }
+
+    pub fn set_max_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
+        self.update(|config| config.max_duty = value)
+    }
+
+    pub fn set_run_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
+        self.update(|config| config.run_duty = value)
+    }
+
+    pub fn set_slow_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
+        self.update(|config| config.slow_duty = value)
+    }
+
+    pub fn set_homing_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
+        self.update(|config| config.homing_duty = value)
+    }
+
+    pub fn set_startup_events(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update(|config| config.startup_events = value)
+    }
+
+    pub fn set_homing_start_timeout(&mut self, value: Duration) -> Result<(), ConfigError> {
+        self.update(|config| config.homing_start_timeout = value)
+    }
+
+    pub fn set_homing_stall_timeout(&mut self, value: Duration) -> Result<(), ConfigError> {
+        self.update(|config| config.homing_stall_timeout = value)
+    }
+
+    pub fn set_homing_poll_interval(&mut self, value: Duration) -> Result<(), ConfigError> {
+        self.update(|config| config.homing_poll_interval = value)
+    }
+
+    pub fn set_homing_backoff_steps(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update(|config| config.homing_backoff_steps = value)
+    }
+
+    pub fn set_default_max_position(&mut self, value: PositionCounts) -> Result<(), ConfigError> {
+        self.update(|config| config.default_max_position = value)
+    }
+
+    pub fn set_move_stall_timeout(&mut self, value: Duration) -> Result<(), ConfigError> {
+        self.update(|config| config.move_stall_timeout = value)
+    }
+
+    pub fn set_target_slow_zone(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update(|config| config.target_slow_zone = value)
+    }
+
+    pub fn set_target_tolerance(&mut self, value: CountDelta) -> Result<(), ConfigError> {
+        self.update(|config| config.target_tolerance = value)
+    }
 }
 
 impl Default for LegRuntimeConfig {
@@ -544,6 +643,34 @@ impl RuntimeConfig {
 
     pub const fn leg(self) -> LegRuntimeConfig {
         self.leg
+    }
+
+    pub fn update_desk(
+        &mut self,
+        update_fn: impl FnOnce(&mut DeskConfig) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        let previous = self.desk;
+        update_fn(&mut self.desk)?;
+        if self.validate().is_ok() {
+            Ok(())
+        } else {
+            self.desk = previous;
+            Err("invalid_config")
+        }
+    }
+
+    pub fn update_leg(
+        &mut self,
+        update_fn: impl FnOnce(&mut LegRuntimeConfig) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        let previous = self.leg;
+        update_fn(&mut self.leg)?;
+        if self.validate().is_ok() {
+            Ok(())
+        } else {
+            self.leg = previous;
+            Err("invalid_config")
+        }
     }
 }
 

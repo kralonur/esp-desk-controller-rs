@@ -334,7 +334,8 @@ async fn main(spawner: Spawner) -> ! {
     motor_1.enable();
     motor_2.enable();
 
-    let runtime_config_reader = RUNTIME_CONFIG_STORAGE.init(Default::default()).reader();
+    let runtime_config_state = RUNTIME_CONFIG_STORAGE.init(Default::default());
+    let runtime_config_reader = runtime_config_state.reader();
 
     let leg_1 = esp_pwm_motor::leg::Leg::new(
         &LEG1_STATUS_STORAGE,
@@ -380,7 +381,13 @@ async fn main(spawner: Spawner) -> ! {
             runtime_config_reader,
         ));
     let mqtt_status_watcher = desk.status_watcher();
-    esp_pwm_motor::mqtt::spawn_mqtt(&spawner, stack, control_state, mqtt_status_watcher);
+    esp_pwm_motor::mqtt::spawn_mqtt(
+        &spawner,
+        stack,
+        control_state,
+        runtime_config_state,
+        mqtt_status_watcher,
+    );
 
     run_desk_control(control_state, DeskRuntime::Unhomed(desk)).await
 }
