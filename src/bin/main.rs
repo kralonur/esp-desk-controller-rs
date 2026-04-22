@@ -288,6 +288,7 @@ async fn main(spawner: Spawner) -> ! {
                 }
             }
         };
+    info!("main continuing after wifi setup");
 
     let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40)).unwrap();
     let mut mcpwm = McPwm::new(peripherals.MCPWM0, clock_cfg);
@@ -333,6 +334,7 @@ async fn main(spawner: Spawner) -> ! {
 
     motor_1.enable();
     motor_2.enable();
+    info!("motors and quadrature initialized");
 
     let runtime_config_state = RUNTIME_CONFIG_STORAGE.init(Default::default());
     let runtime_config_reader = runtime_config_state.reader();
@@ -380,7 +382,9 @@ async fn main(spawner: Spawner) -> ! {
             desk.status_reader(),
             runtime_config_reader,
         ));
+    info!("desk controller initialized");
     let mqtt_status_watcher = desk.status_watcher();
+    info!("spawning mqtt task");
     esp_pwm_motor::mqtt::spawn_mqtt(
         &spawner,
         stack,
@@ -388,6 +392,7 @@ async fn main(spawner: Spawner) -> ! {
         runtime_config_state,
         mqtt_status_watcher,
     );
+    info!("entering desk control loop");
 
     run_desk_control(control_state, DeskRuntime::Unhomed(desk)).await
 }

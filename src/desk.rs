@@ -118,7 +118,7 @@ enum TravelDirection {
 
 #[derive(Clone, Copy)]
 struct AxisTargetState {
-    at_target: bool,
+    done: bool,
     near_target: bool,
     base_duty: DutyPercent,
 }
@@ -241,11 +241,18 @@ impl TravelDirection {
 }
 
 impl MoveSnapshot {
-    fn new(config: DeskConfig, target: i32, left_position: i32, right_position: i32) -> Self {
+    fn new(
+        config: DeskConfig,
+        direction: TravelDirection,
+        target: i32,
+        left_position: i32,
+        right_position: i32,
+    ) -> Self {
+        let tolerance = config.target_tolerance().get_i32();
         let left_error = target - left_position;
         let right_error = target - right_position;
-        let left_at_target = left_error.abs() <= config.target_tolerance().get_i32();
-        let right_at_target = right_error.abs() <= config.target_tolerance().get_i32();
+        let left_done = axis_done(direction, target, left_position, tolerance);
+        let right_done = axis_done(direction, target, right_position, tolerance);
         let left_near = left_error.abs() <= config.target_slow_zone().get_i32();
         let right_near = right_error.abs() <= config.target_slow_zone().get_i32();
 
@@ -253,20 +260,20 @@ impl MoveSnapshot {
             observed_skew: left_position - right_position,
             observed_skew_abs: (left_position - right_position).abs(),
             left: AxisTargetState {
-                at_target: left_at_target,
+                done: left_done,
                 near_target: left_near,
-                base_duty: axis_base_duty(config, left_near, left_at_target, right_at_target),
+                base_duty: axis_base_duty(config, left_near, left_done, right_done),
             },
             right: AxisTargetState {
-                at_target: right_at_target,
+                done: right_done,
                 near_target: right_near,
-                base_duty: axis_base_duty(config, right_near, right_at_target, left_at_target),
+                base_duty: axis_base_duty(config, right_near, right_done, left_done),
             },
         }
     }
 
     fn is_complete(self) -> bool {
-        self.left.at_target && self.right.at_target
+        self.left.done && self.right.done
     }
 
     fn is_skew_fault(self, config: DeskConfig) -> bool {
@@ -1088,6 +1095,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
 
             let snapshot = MoveSnapshot::new(
                 desk_config,
+                direction,
                 shared_target,
                 left_status.position,
                 right_status.position,
@@ -1187,13 +1195,8 @@ fn next_sync_phase(config: DeskConfig, current: SyncPhase, effective_skew_abs: i
     }
 }
 
-fn axis_base_duty(
-    config: DeskConfig,
-    near: bool,
-    at_target: bool,
-    other_at_target: bool,
-) -> DutyPercent {
-    if other_at_target && !at_target {
+fn axis_base_duty(config: DeskConfig, near: bool, done: bool, other_done: bool) -> DutyPercent {
+    if other_done && !done {
         config.move_run_duty()
     } else if near {
         config.move_slow_duty()
@@ -1227,7 +1230,7 @@ fn plan_move_leg(
     phase: SyncPhase,
     is_leader: bool,
 ) -> LegPlan {
-    if axis.at_target || (matches!(phase, SyncPhase::PauseLead) && is_leader) {
+    if axis.done || (matches!(phase, SyncPhase::PauseLead) && is_leader) {
         return LegPlan::Stop;
     }
 
@@ -1239,6 +1242,13 @@ fn plan_move_leg(
     match direction {
         TravelDirection::Up => LegPlan::Up(duty),
         TravelDirection::Down => LegPlan::Down(duty),
+    }
+}
+
+fn axis_done(direction: TravelDirection, target: i32, position: i32, tolerance: i32) -> bool {
+    match direction {
+        TravelDirection::Up => position >= target.saturating_sub(tolerance),
+        TravelDirection::Down => position <= target.saturating_add(tolerance),
     }
 }
 
