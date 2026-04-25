@@ -3,13 +3,46 @@ use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
 use embassy_executor::Spawner;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
+    signal::Signal,
     watch::{Receiver, Watch},
 };
-use esp_hal::gpio::{Input, InputConfig, InputPin, Level, Pull};
+use esp_hal::{
+    gpio::{Input, InputConfig, InputPin, Level, Pull},
+    handler,
+    interrupt::Priority,
+    pcnt::{
+        channel,
+        unit::{Counter, Unit},
+    },
+    peripherals::PCNT,
+};
 use static_cell::StaticCell;
 
 const HALL1_BIT: u8 = 0b10;
 const HALL2_BIT: u8 = 0b01;
+
+// PCNT references:
+// - ESP-IDF PCNT docs, watch points/events and glitch filter:
+//   https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/peripherals/pcnt.html
+// - ESP32Encoder PCNT accumulator pattern:
+//   https://github.com/madhephaestus/ESP32Encoder
+//
+// `PCNT_GLITCH_FILTER_CYCLES` is the hardware input filter window in APB clock
+// cycles. At the usual 80 MHz APB clock, 80 cycles is about 1 us; pulses shorter
+// than that are treated as noise and ignored by the PCNT hardware.
+const PCNT_GLITCH_FILTER_CYCLES: u16 = 80;
+
+// `PCNT_EVENT_STEP` is the signed count threshold that wakes firmware. PCNT
+// still counts every quadrature edge in hardware; the interrupt fires when the
+// hardware count reaches +N or -N. The ISR adds that raw count into the software
+// accumulator, clears the hardware counter back to zero, and wakes the async
+// task to publish the latest position.
+const PCNT_EVENT_STEP: i16 = 2;
+
+static PCNT_UNIT0_BASE: AtomicI32 = AtomicI32::new(0);
+static PCNT_UNIT1_BASE: AtomicI32 = AtomicI32::new(0);
+static PCNT_UNIT0_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+static PCNT_UNIT1_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuadratureDirection {
@@ -33,10 +66,17 @@ pub struct QuadratureEvent {
     pub snapshot: QuadratureSnapshot,
 }
 
+#[derive(Clone)]
+enum QuadratureCounter {
+    Unit0(Counter<'static, 0>),
+    Unit1(Counter<'static, 1>),
+}
+
 struct QuadratureState {
     state: AtomicU8,
     position: AtomicI32,
     invalid_transitions: AtomicU32,
+    counter: QuadratureCounter,
     events: Watch<CriticalSectionRawMutex, QuadratureEvent, 4>,
 }
 
@@ -44,9 +84,10 @@ pub struct QuadratureStorage {
     state: StaticCell<QuadratureState>,
 }
 
-pub struct Quadrature<'a> {
-    hall1: Input<'a>,
-    hall2: Input<'a>,
+pub struct Quadrature<const UNIT: usize> {
+    hall1: Input<'static>,
+    hall2: Input<'static>,
+    unit: Unit<'static, UNIT>,
     state: &'static QuadratureState,
 }
 
@@ -65,12 +106,41 @@ impl QuadratureSnapshot {
     }
 }
 
+impl QuadratureCounter {
+    fn get(&self) -> i32 {
+        match self {
+            Self::Unit0(counter) => counter.get() as i32,
+            Self::Unit1(counter) => counter.get() as i32,
+        }
+    }
+
+    fn base(&self) -> &'static AtomicI32 {
+        match self {
+            Self::Unit0(_) => &PCNT_UNIT0_BASE,
+            Self::Unit1(_) => &PCNT_UNIT1_BASE,
+        }
+    }
+
+    fn position(&self) -> i32 {
+        self.base().load(Ordering::Acquire) + self.get()
+    }
+
+    fn reset(&self) {
+        match self {
+            Self::Unit0(_) => clear_pcnt_unit::<0>(),
+            Self::Unit1(_) => clear_pcnt_unit::<1>(),
+        }
+        self.base().store(0, Ordering::Release);
+    }
+}
+
 impl QuadratureState {
-    const fn new() -> Self {
+    fn new(counter: QuadratureCounter) -> Self {
         Self {
             state: AtomicU8::new(0),
             position: AtomicI32::new(0),
             invalid_transitions: AtomicU32::new(0),
+            counter,
             events: Watch::new(),
         }
     }
@@ -78,13 +148,14 @@ impl QuadratureState {
     fn initialize(&self, initial_state: u8) {
         self.state.store(initial_state, Ordering::Release);
         self.position.store(0, Ordering::Release);
+        self.counter.reset();
         self.invalid_transitions.store(0, Ordering::Release);
     }
 
     fn snapshot(&self) -> QuadratureSnapshot {
         QuadratureSnapshot {
             state: self.state.load(Ordering::Acquire),
-            position: self.position.load(Ordering::Acquire),
+            position: self.counter.position(),
             invalid_transitions: self.invalid_transitions.load(Ordering::Acquire),
         }
     }
@@ -104,18 +175,92 @@ impl QuadratureStorage {
     }
 }
 
-impl Quadrature<'static> {
+impl Quadrature<0> {
     pub fn new(
         storage: &'static QuadratureStorage,
+        unit: Unit<'static, 0>,
         hall1_pin: impl InputPin + 'static,
         hall2_pin: impl InputPin + 'static,
     ) -> (Self, QuadratureSnapshot) {
+        Self::new_with_counter(
+            storage,
+            unit,
+            QuadratureCounter::Unit0,
+            hall1_pin,
+            hall2_pin,
+        )
+    }
+
+    pub fn spawn(self, spawner: &Spawner) {
+        spawner.must_spawn(monitor_pcnt_unit0(
+            self.hall1, self.hall2, self.unit, self.state,
+        ));
+    }
+}
+
+impl Quadrature<1> {
+    pub fn new(
+        storage: &'static QuadratureStorage,
+        unit: Unit<'static, 1>,
+        hall1_pin: impl InputPin + 'static,
+        hall2_pin: impl InputPin + 'static,
+    ) -> (Self, QuadratureSnapshot) {
+        Self::new_with_counter(
+            storage,
+            unit,
+            QuadratureCounter::Unit1,
+            hall1_pin,
+            hall2_pin,
+        )
+    }
+
+    pub fn spawn(self, spawner: &Spawner) {
+        spawner.must_spawn(monitor_pcnt_unit1(
+            self.hall1, self.hall2, self.unit, self.state,
+        ));
+    }
+}
+
+impl<const UNIT: usize> Quadrature<UNIT> {
+    fn new_with_counter(
+        storage: &'static QuadratureStorage,
+        unit: Unit<'static, UNIT>,
+        counter: impl FnOnce(Counter<'static, UNIT>) -> QuadratureCounter,
+        hall1_pin: impl InputPin + 'static,
+        hall2_pin: impl InputPin + 'static,
+    ) -> (Self, QuadratureSnapshot) {
+        unit.pause();
+        unit.set_filter(Some(PCNT_GLITCH_FILTER_CYCLES))
+            .expect("valid PCNT glitch filter threshold");
+        unit.set_threshold0(Some(PCNT_EVENT_STEP));
+        unit.set_threshold1(Some(-PCNT_EVENT_STEP));
+        unit.clear();
+
         let hall1 = Input::new(hall1_pin, hall_input_config());
         let hall2 = Input::new(hall2_pin, hall_input_config());
+        let input1 = hall1.peripheral_input();
+        let input2 = hall2.peripheral_input();
+
+        let ch0 = &unit.channel0;
+        ch0.set_ctrl_signal(input1.clone());
+        ch0.set_edge_signal(input2.clone());
+        ch0.set_ctrl_mode(channel::CtrlMode::Reverse, channel::CtrlMode::Keep);
+        ch0.set_input_mode(channel::EdgeMode::Increment, channel::EdgeMode::Decrement);
+
+        let ch1 = &unit.channel1;
+        ch1.set_ctrl_signal(input2);
+        ch1.set_edge_signal(input1);
+        ch1.set_ctrl_mode(channel::CtrlMode::Reverse, channel::CtrlMode::Keep);
+        ch1.set_input_mode(channel::EdgeMode::Decrement, channel::EdgeMode::Increment);
+
         let initial_state = state_from_levels(hall1.level(), hall2.level());
-        let state = storage.state.init(QuadratureState::new());
+        let state = storage
+            .state
+            .init(QuadratureState::new(counter(unit.counter.clone())));
 
         state.initialize(initial_state);
+        unit.listen();
+        unit.resume();
 
         let snapshot = state.snapshot();
 
@@ -123,15 +268,11 @@ impl Quadrature<'static> {
             Self {
                 hall1,
                 hall2,
+                unit,
                 state,
             },
             snapshot,
         )
-    }
-
-    pub fn spawn(self, spawner: &Spawner) {
-        spawner.must_spawn(monitor_hall(1, HALL1_BIT, self.hall1, self.state));
-        spawner.must_spawn(monitor_hall(2, HALL2_BIT, self.hall2, self.state));
     }
 
     pub fn watcher(&self) -> QuadratureWatcher {
@@ -168,6 +309,7 @@ impl QuadratureWatcher {
     }
 
     pub fn reset_position(&self) {
+        self.state.counter.reset();
         self.state.position.store(0, Ordering::Release);
     }
 
@@ -175,11 +317,11 @@ impl QuadratureWatcher {
         self.receiver.changed().await
     }
 
-    pub async fn wait_for_direction(&mut self, direction: QuadratureDirection) {
+    pub async fn wait_for_direction(&mut self, direction: QuadratureDirection) -> QuadratureEvent {
         loop {
             let event = self.wait_for_change().await;
             if event.direction == direction {
-                return;
+                return event;
             }
         }
     }
@@ -203,83 +345,93 @@ fn state_from_levels(hall1: Level, hall2: Level) -> u8 {
     state
 }
 
-fn quadrature_delta(old: u8, new: u8) -> i32 {
-    match (old, new) {
-        (0b00, 0b01) | (0b01, 0b11) | (0b11, 0b10) | (0b10, 0b00) => 1,
-        (0b00, 0b10) | (0b10, 0b11) | (0b11, 0b01) | (0b01, 0b00) => -1,
-        _ => 0,
+fn publish_position_if_changed(state: &'static QuadratureState, hall1: Level, hall2: Level) {
+    state
+        .state
+        .store(state_from_levels(hall1, hall2), Ordering::Release);
+    let snapshot = state.snapshot();
+    let previous = state.position.swap(snapshot.position, Ordering::AcqRel);
+    if snapshot.position == previous {
+        return;
     }
+
+    let direction = if snapshot.position > previous {
+        QuadratureDirection::Positive
+    } else {
+        QuadratureDirection::Negative
+    };
+
+    state.events.sender().send(QuadratureEvent {
+        channel: 0,
+        level: hall1,
+        direction,
+        snapshot,
+    });
 }
 
-fn update_quadrature_state(state: &'static QuadratureState, channel: u8, bit: u8, level: Level) {
+fn clear_pcnt_unit<const UNIT: usize>() {
+    let pcnt = PCNT::regs();
+    pcnt.ctrl().modify(|_, w| w.cnt_rst_u(UNIT as u8).set_bit());
+    pcnt.ctrl()
+        .modify(|_, w| w.cnt_rst_u(UNIT as u8).clear_bit());
+}
+
+fn handle_pcnt_unit_interrupt<const UNIT: usize>(
+    base: &'static AtomicI32,
+    signal: &'static Signal<CriticalSectionRawMutex, ()>,
+) {
+    let pcnt = PCNT::regs();
+    if !pcnt.int_raw().read().cnt_thr_event_u(UNIT as u8).bit() {
+        return;
+    }
+
+    let raw_position = pcnt.u_cnt(UNIT).read().cnt().bits() as i16 as i32;
+    if raw_position != 0 {
+        base.fetch_add(raw_position, Ordering::AcqRel);
+        clear_pcnt_unit::<UNIT>();
+    }
+
+    pcnt.int_clr()
+        .write(|w| w.cnt_thr_event_u(UNIT as u8).set_bit());
+    signal.signal(());
+}
+
+#[handler(priority = Priority::Priority2)]
+pub fn pcnt_interrupt_handler() {
+    handle_pcnt_unit_interrupt::<0>(&PCNT_UNIT0_BASE, &PCNT_UNIT0_SIGNAL);
+    handle_pcnt_unit_interrupt::<1>(&PCNT_UNIT1_BASE, &PCNT_UNIT1_SIGNAL);
+}
+
+async fn monitor_pcnt(
+    hall1: Input<'static>,
+    hall2: Input<'static>,
+    state: &'static QuadratureState,
+    signal: &'static Signal<CriticalSectionRawMutex, ()>,
+) {
     loop {
-        let old_state = state.state.load(Ordering::Acquire);
-        let new_state = match level {
-            Level::Low => old_state & !bit,
-            Level::High => old_state | bit,
-        };
-
-        if new_state == old_state {
-            return;
-        }
-
-        if state
-            .state
-            .compare_exchange(old_state, new_state, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            let delta = quadrature_delta(old_state, new_state);
-
-            let snapshot = if delta == 0 {
-                state.invalid_transitions.fetch_add(1, Ordering::AcqRel);
-                QuadratureSnapshot {
-                    state: new_state,
-                    position: state.position.load(Ordering::Acquire),
-                    invalid_transitions: state.invalid_transitions.load(Ordering::Acquire),
-                }
-            } else {
-                let position = state.position.fetch_add(delta, Ordering::AcqRel) + delta;
-                QuadratureSnapshot {
-                    state: new_state,
-                    position,
-                    invalid_transitions: state.invalid_transitions.load(Ordering::Acquire),
-                }
-            };
-
-            let direction = match delta {
-                1 => QuadratureDirection::Positive,
-                -1 => QuadratureDirection::Negative,
-                _ => QuadratureDirection::Invalid,
-            };
-
-            state.events.sender().send(QuadratureEvent {
-                channel,
-                level,
-                direction,
-                snapshot,
-            });
-
-            return;
-        }
+        signal.wait().await;
+        publish_position_if_changed(state, hall1.level(), hall2.level());
     }
 }
 
-#[embassy_executor::task(pool_size = 4)]
-async fn monitor_hall(
-    channel: u8,
-    bit: u8,
-    mut pin: Input<'static>,
+#[embassy_executor::task]
+async fn monitor_pcnt_unit0(
+    hall1: Input<'static>,
+    hall2: Input<'static>,
+    unit: Unit<'static, 0>,
     state: &'static QuadratureState,
 ) {
-    let mut level = pin.level();
+    monitor_pcnt(hall1, hall2, state, &PCNT_UNIT0_SIGNAL).await;
+    unit.pause();
+}
 
-    loop {
-        pin.wait_for_any_edge().await;
-
-        let next_level = pin.level();
-        if next_level != level {
-            level = next_level;
-            update_quadrature_state(state, channel, bit, level);
-        }
-    }
+#[embassy_executor::task]
+async fn monitor_pcnt_unit1(
+    hall1: Input<'static>,
+    hall2: Input<'static>,
+    unit: Unit<'static, 1>,
+    state: &'static QuadratureState,
+) {
+    monitor_pcnt(hall1, hall2, state, &PCNT_UNIT1_SIGNAL).await;
+    unit.pause();
 }

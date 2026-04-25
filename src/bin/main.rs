@@ -13,6 +13,7 @@ use embassy_time::{Duration, Timer};
 use esp_hal::{
     clock::CpuClock,
     mcpwm::{McPwm, PeripheralClockConfig, PwmPeripheral},
+    pcnt::Pcnt,
     rng::Rng,
     time::Rate,
     timer::timg::TimerGroup,
@@ -330,14 +331,25 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap();
     mcpwm.timer0.start(timer_clock_cfg);
 
-    let (quadrature_1, _snapshot_1) =
-        Quadrature::new(&QUADRATURE1_STORAGE, leg_1_hall1_pin, leg_1_hall2_pin);
+    let mut pcnt = Pcnt::new(peripherals.PCNT);
+    pcnt.set_interrupt_handler(esp_pwm_motor::quadrature::pcnt_interrupt_handler);
+
+    let (quadrature_1, _snapshot_1) = Quadrature::<0>::new(
+        &QUADRATURE1_STORAGE,
+        pcnt.unit0,
+        leg_1_hall1_pin,
+        leg_1_hall2_pin,
+    );
     let leg_watcher_1 = quadrature_1.watcher();
     let leg_status_source_1 = quadrature_1.watcher();
     quadrature_1.spawn(&spawner);
 
-    let (quadrature_2, _snapshot_2) =
-        Quadrature::new(&QUADRATURE2_STORAGE, leg_2_hall1_pin, leg_2_hall2_pin);
+    let (quadrature_2, _snapshot_2) = Quadrature::<1>::new(
+        &QUADRATURE2_STORAGE,
+        pcnt.unit1,
+        leg_2_hall1_pin,
+        leg_2_hall2_pin,
+    );
     let leg_watcher_2 = quadrature_2.watcher();
     let leg_status_source_2 = quadrature_2.watcher();
     quadrature_2.spawn(&spawner);

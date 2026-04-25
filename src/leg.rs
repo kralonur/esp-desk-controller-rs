@@ -309,22 +309,36 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         self.apply_drive_mode(DriveMode::UpBoost, runtime_config);
 
         let startup_steps = steps.min(runtime_config.startup_events().get());
-        let mut steps_taken = 0;
+        let start_position = self.encoder_position();
 
-        while steps_taken < startup_steps {
-            self.quadrature_watcher
+        while travel_in_direction(start_position, self.encoder_position(), expected_direction)
+            < startup_steps as i32
+        {
+            let event = self
+                .quadrature_watcher
                 .wait_for_direction(expected_direction)
                 .await;
-            steps_taken += 1;
+            if travel_in_direction(start_position, event.snapshot.position, expected_direction)
+                >= startup_steps as i32
+            {
+                break;
+            }
         }
 
         self.apply_drive_mode(DriveMode::UpRun, runtime_config);
 
-        while steps_taken < steps {
-            self.quadrature_watcher
+        while travel_in_direction(start_position, self.encoder_position(), expected_direction)
+            < steps as i32
+        {
+            let event = self
+                .quadrature_watcher
                 .wait_for_direction(expected_direction)
                 .await;
-            steps_taken += 1;
+            if travel_in_direction(start_position, event.snapshot.position, expected_direction)
+                >= steps as i32
+            {
+                break;
+            }
         }
 
         self.apply_drive_mode(DriveMode::Stop, runtime_config);
@@ -432,6 +446,18 @@ fn progressed_in_direction(
         QuadratureDirection::Positive => current_position > last_position,
         QuadratureDirection::Negative => current_position < last_position,
         QuadratureDirection::Invalid => false,
+    }
+}
+
+fn travel_in_direction(
+    start_position: i32,
+    current_position: i32,
+    direction: QuadratureDirection,
+) -> i32 {
+    match direction {
+        QuadratureDirection::Positive => (current_position - start_position).max(0),
+        QuadratureDirection::Negative => (start_position - current_position).max(0),
+        QuadratureDirection::Invalid => 0,
     }
 }
 
@@ -763,8 +789,8 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             return Ok(());
         }
 
-        let mut steps_taken = 0;
         let startup_steps = steps.min(runtime_config.startup_events().get());
+        let start_position = self.encoder_position();
 
         if direction == self.state.up_direction {
             self.start_up_boost(runtime_config);
@@ -775,10 +801,17 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             return Ok(());
         }
 
-        while steps_taken < startup_steps {
-            self.wait_for_progress(direction, runtime_config.move_stall_timeout())
+        while travel_in_direction(start_position, self.encoder_position(), direction)
+            < startup_steps as i32
+        {
+            let event = self
+                .wait_for_progress(direction, runtime_config.move_stall_timeout())
                 .await?;
-            steps_taken += 1;
+            if travel_in_direction(start_position, event.snapshot.position, direction)
+                >= startup_steps as i32
+            {
+                break;
+            }
         }
 
         if direction == self.state.up_direction {
@@ -791,10 +824,16 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             self.send_status(self.status());
         }
 
-        while steps_taken < steps {
-            self.wait_for_progress(direction, runtime_config.move_stall_timeout())
+        while travel_in_direction(start_position, self.encoder_position(), direction) < steps as i32
+        {
+            let event = self
+                .wait_for_progress(direction, runtime_config.move_stall_timeout())
                 .await?;
-            steps_taken += 1;
+            if travel_in_direction(start_position, event.snapshot.position, direction)
+                >= steps as i32
+            {
+                break;
+            }
         }
 
         self.stop();
