@@ -1044,7 +1044,7 @@ fn parse_obstruction_sensitivity(value: &str) -> Result<ObstructionSensitivity, 
 
 fn config_error_name(error: ConfigError) -> &'static str {
     match error {
-        ConfigError::InvalidDeskConfig => "invalid_config",
+        ConfigError::InvalidDeskConfig | ConfigError::InvalidLegConfig => "invalid_config",
     }
 }
 

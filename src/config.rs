@@ -63,6 +63,7 @@ pub enum ObstructionSensitivity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub enum ConfigError {
     InvalidDeskConfig,
+    InvalidLegConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -480,7 +481,7 @@ const fn obstruction_detection_time_ms_from_sensitivity(
 
 impl LegRuntimeConfig {
     pub const fn new() -> Self {
-        Self {
+        let config = Self {
             startup_duty: DEFAULT_LEG_STARTUP_DUTY,
             max_duty: DEFAULT_LEG_MAX_DUTY,
             run_duty: DEFAULT_LEG_RUN_DUTY,
@@ -495,12 +496,32 @@ impl LegRuntimeConfig {
             move_stall_timeout: DEFAULT_LEG_MOVE_STALL_TIMEOUT,
             target_slow_zone: DEFAULT_LEG_TARGET_SLOW_ZONE,
             target_tolerance: DEFAULT_LEG_TARGET_TOLERANCE,
+        };
+        assert!(config.is_valid(), "invalid default leg config");
+        config
+    }
+
+    pub const fn validate(self) -> Result<Self, ConfigError> {
+        if self.is_valid() {
+            Ok(self)
+        } else {
+            Err(ConfigError::InvalidLegConfig)
         }
     }
 
-    fn update(&mut self, update_fn: impl FnOnce(&mut Self)) -> Result<(), ConfigError> {
+    const fn is_valid(self) -> bool {
+        self.default_max_position.get() >= 0
+    }
+
+    fn update_checked(&mut self, update_fn: impl FnOnce(&mut Self)) -> Result<(), ConfigError> {
+        let previous = *self;
         update_fn(self);
-        Ok(())
+        if self.is_valid() {
+            Ok(())
+        } else {
+            *self = previous;
+            Err(ConfigError::InvalidLegConfig)
+        }
     }
 
     pub const fn startup_duty(self) -> DutyPercent {
@@ -560,59 +581,59 @@ impl LegRuntimeConfig {
     }
 
     pub fn set_startup_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
-        self.update(|config| config.startup_duty = value)
+        self.update_checked(|config| config.startup_duty = value)
     }
 
     pub fn set_max_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
-        self.update(|config| config.max_duty = value)
+        self.update_checked(|config| config.max_duty = value)
     }
 
     pub fn set_run_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
-        self.update(|config| config.run_duty = value)
+        self.update_checked(|config| config.run_duty = value)
     }
 
     pub fn set_slow_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
-        self.update(|config| config.slow_duty = value)
+        self.update_checked(|config| config.slow_duty = value)
     }
 
     pub fn set_homing_duty(&mut self, value: DutyPercent) -> Result<(), ConfigError> {
-        self.update(|config| config.homing_duty = value)
+        self.update_checked(|config| config.homing_duty = value)
     }
 
     pub fn set_startup_events(&mut self, value: CountDelta) -> Result<(), ConfigError> {
-        self.update(|config| config.startup_events = value)
+        self.update_checked(|config| config.startup_events = value)
     }
 
     pub fn set_homing_start_timeout(&mut self, value: Duration) -> Result<(), ConfigError> {
-        self.update(|config| config.homing_start_timeout = value)
+        self.update_checked(|config| config.homing_start_timeout = value)
     }
 
     pub fn set_homing_stall_timeout(&mut self, value: Duration) -> Result<(), ConfigError> {
-        self.update(|config| config.homing_stall_timeout = value)
+        self.update_checked(|config| config.homing_stall_timeout = value)
     }
 
     pub fn set_homing_poll_interval(&mut self, value: Duration) -> Result<(), ConfigError> {
-        self.update(|config| config.homing_poll_interval = value)
+        self.update_checked(|config| config.homing_poll_interval = value)
     }
 
     pub fn set_homing_backoff_steps(&mut self, value: CountDelta) -> Result<(), ConfigError> {
-        self.update(|config| config.homing_backoff_steps = value)
+        self.update_checked(|config| config.homing_backoff_steps = value)
     }
 
     pub fn set_default_max_position(&mut self, value: PositionCounts) -> Result<(), ConfigError> {
-        self.update(|config| config.default_max_position = value)
+        self.update_checked(|config| config.default_max_position = value)
     }
 
     pub fn set_move_stall_timeout(&mut self, value: Duration) -> Result<(), ConfigError> {
-        self.update(|config| config.move_stall_timeout = value)
+        self.update_checked(|config| config.move_stall_timeout = value)
     }
 
     pub fn set_target_slow_zone(&mut self, value: CountDelta) -> Result<(), ConfigError> {
-        self.update(|config| config.target_slow_zone = value)
+        self.update_checked(|config| config.target_slow_zone = value)
     }
 
     pub fn set_target_tolerance(&mut self, value: CountDelta) -> Result<(), ConfigError> {
-        self.update(|config| config.target_tolerance = value)
+        self.update_checked(|config| config.target_tolerance = value)
     }
 }
 
@@ -632,7 +653,10 @@ impl RuntimeConfig {
 
     pub const fn validate(self) -> Result<Self, ConfigError> {
         match self.desk.validate() {
-            Ok(_) => Ok(self),
+            Ok(_) => match self.leg.validate() {
+                Ok(_) => Ok(self),
+                Err(error) => Err(error),
+            },
             Err(error) => Err(error),
         }
     }
