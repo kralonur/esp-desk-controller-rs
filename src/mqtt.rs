@@ -550,7 +550,7 @@ fn status_response(state: &DeskControllerState) -> String {
     let snapshot = state.snapshot();
     let status = state.status();
     format!(
-        "mode={}\ncommand_pending={}\nstop_requested={}\nlast_fault={}\nhomed={}\nneeds_rehome={}\nmotion={}\nlast_stop_reason={}\nobstruction_sensitivity={}\ntarget_active={}\ntarget_position={}\naverage_position={}\nleft_position={}\nright_position={}\nmin_position={}\nmax_position={}\nskew_counts={}\n",
+        "mode={}\ncommand_pending={}\nstop_requested={}\nlast_fault={}\nhomed={}\nneeds_rehome={}\nmotion={}\nlast_stop_reason={}\nobstruction_sensitivity={}\ntarget_active={}\ntarget_position={}\naverage_position={}\nleft_position={}\nright_position={}\nleft_duty={}\nright_duty={}\nmin_position={}\nmax_position={}\nskew_counts={}\n",
         controller_mode_name(snapshot.mode),
         bool_name(snapshot.command_pending),
         bool_name(snapshot.stop_requested),
@@ -565,6 +565,8 @@ fn status_response(state: &DeskControllerState) -> String {
         status.average_position,
         status.left_position,
         status.right_position,
+        status.left_duty,
+        status.right_duty,
         status.min_position,
         status.max_position,
         status.skew_counts,

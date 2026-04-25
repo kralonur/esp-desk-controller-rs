@@ -51,6 +51,7 @@ pub struct LegStatus {
     pub position: i32,
     pub min_position: i32,
     pub max_position: i32,
+    pub duty: u8,
     pub motion: MotionState,
     pub homed: bool,
 }
@@ -151,15 +152,18 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
     }
 
     pub fn apply_drive_mode(&mut self, mode: DriveMode, runtime_config: LegRuntimeConfig) {
-        match mode {
-            DriveMode::Stop => self.coast(),
+        let duty = match mode {
+            DriveMode::Stop => {
+                self.coast();
+                DutyPercent::new(0)
+            }
             DriveMode::UpBoost => self.drive_up_boost(runtime_config),
             DriveMode::UpRun => self.drive_up_run(runtime_config),
             DriveMode::UpSlow => self.drive_up_slow(runtime_config),
             DriveMode::DownBoost => self.drive_down_boost(runtime_config),
             DriveMode::DownSlow => self.drive_down_slow(runtime_config),
             DriveMode::HomeDown => self.drive_home_down(runtime_config),
-        }
+        };
 
         let motion = match mode {
             DriveMode::Stop => MotionState::Idle,
@@ -170,6 +174,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         };
 
         self.send_status(LegStatus {
+            duty: duty.get(),
             motion,
             ..self.current_status()
         });
@@ -185,8 +190,9 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         } else {
             duty
         };
-        self.drive_side(self.config.up_drive, duty, runtime_config);
+        let duty = self.drive_side(self.config.up_drive, duty, runtime_config);
         self.send_status(LegStatus {
+            duty: duty.get(),
             motion: MotionState::MovingUp,
             ..self.current_status()
         });
@@ -198,12 +204,13 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         } else {
             duty
         };
-        self.drive_side(
+        let duty = self.drive_side(
             opposite_drive_side(self.config.up_drive),
             duty,
             runtime_config,
         );
         self.send_status(LegStatus {
+            duty: duty.get(),
             motion: MotionState::MovingDown,
             ..self.current_status()
         });
@@ -215,81 +222,89 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         } else {
             duty
         };
-        self.drive_side(
+        let duty = self.drive_side(
             opposite_drive_side(self.config.up_drive),
             duty,
             runtime_config,
         );
         self.send_status(LegStatus {
+            duty: duty.get(),
             motion: MotionState::MovingDown,
             ..self.current_status()
         });
     }
 
-    fn drive_up_boost(&mut self, runtime_config: LegRuntimeConfig) {
+    fn drive_up_boost(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
         self.drive_side(
             self.config.up_drive,
             runtime_config.startup_duty(),
             runtime_config,
-        );
+        )
     }
 
-    fn drive_down_boost(&mut self, runtime_config: LegRuntimeConfig) {
+    fn drive_down_boost(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
         self.drive_side(
             opposite_drive_side(self.config.up_drive),
             runtime_config.startup_duty(),
             runtime_config,
-        );
+        )
     }
 
-    fn drive_up_run(&mut self, runtime_config: LegRuntimeConfig) {
+    fn drive_up_run(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
         self.drive_side(
             self.config.up_drive,
             runtime_config.run_duty(),
             runtime_config,
-        );
+        )
     }
 
-    fn drive_down_run(&mut self, runtime_config: LegRuntimeConfig) {
+    fn drive_down_run(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
         self.drive_side(
             opposite_drive_side(self.config.up_drive),
             runtime_config.run_duty(),
             runtime_config,
-        );
+        )
     }
 
-    fn drive_up_slow(&mut self, runtime_config: LegRuntimeConfig) {
+    fn drive_up_slow(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
         self.drive_side(
             self.config.up_drive,
             runtime_config.slow_duty(),
             runtime_config,
-        );
+        )
     }
 
-    fn drive_down_slow(&mut self, runtime_config: LegRuntimeConfig) {
+    fn drive_down_slow(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
         self.drive_side(
             opposite_drive_side(self.config.up_drive),
             runtime_config.slow_duty(),
             runtime_config,
-        );
+        )
     }
 
-    fn drive_home_down(&mut self, runtime_config: LegRuntimeConfig) {
+    fn drive_home_down(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
         self.drive_side(
             opposite_drive_side(self.config.up_drive),
             runtime_config.homing_duty(),
             runtime_config,
-        );
+        )
     }
 
-    fn drive_side(&mut self, side: DriveSide, duty: DutyPercent, runtime_config: LegRuntimeConfig) {
+    fn drive_side(
+        &mut self,
+        side: DriveSide,
+        duty: DutyPercent,
+        runtime_config: LegRuntimeConfig,
+    ) -> DutyPercent {
         let duty = duty
             .min(runtime_config.max_duty())
-            .to_pwm_timestamp(PWM_TIMER_MAX_TICKS);
+            .min(DutyPercent::new(100));
+        let timestamp = duty.to_pwm_timestamp(PWM_TIMER_MAX_TICKS);
         match side {
-            DriveSide::Left => self.motor.drive_left(duty),
-            DriveSide::Right => self.motor.drive_right(duty),
+            DriveSide::Left => self.motor.drive_left(timestamp),
+            DriveSide::Right => self.motor.drive_right(timestamp),
         }
+        duty
     }
 
     async fn move_up_steps(
@@ -496,6 +511,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
             position: self.logical_position(),
             min_position: 0,
             max_position: 0,
+            duty: 0,
             motion: MotionState::Idle,
             homed: false,
         }
@@ -514,6 +530,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
             position: quadrature_watcher.snapshot().position,
             min_position: 0,
             max_position: 0,
+            duty: 0,
             motion: MotionState::Idle,
             homed: false,
         };
@@ -665,6 +682,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             position: self.logical_position(),
             min_position: 0,
             max_position: 0,
+            duty: 0,
             motion: MotionState::Idle,
             homed: false,
         });
@@ -727,9 +745,12 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             return;
         }
 
-        self.drive_up_run(runtime_config);
+        let duty = self.drive_up_run(runtime_config);
         self.state.motion = MotionState::MovingUp;
-        self.send_status(self.status());
+        self.send_status(LegStatus {
+            duty: duty.get(),
+            ..self.status()
+        });
     }
 
     pub fn move_down(&mut self) {
@@ -739,15 +760,21 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             return;
         }
 
-        self.drive_down_run(runtime_config);
+        let duty = self.drive_down_run(runtime_config);
         self.state.motion = MotionState::MovingDown;
-        self.send_status(self.status());
+        self.send_status(LegStatus {
+            duty: duty.get(),
+            ..self.status()
+        });
     }
 
     pub fn stop(&mut self) {
         self.coast();
         self.state.motion = MotionState::Idle;
-        self.send_status(self.status());
+        self.send_status(LegStatus {
+            duty: 0,
+            ..self.status()
+        });
     }
 
     async fn wait_for_progress(
@@ -815,13 +842,19 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         }
 
         if direction == self.state.up_direction {
-            self.drive_up_run(runtime_config);
+            let duty = self.drive_up_run(runtime_config);
             self.state.motion = MotionState::MovingUp;
-            self.send_status(self.status());
+            self.send_status(LegStatus {
+                duty: duty.get(),
+                ..self.status()
+            });
         } else if direction == self.state.down_direction {
-            self.drive_down_run(runtime_config);
+            let duty = self.drive_down_run(runtime_config);
             self.state.motion = MotionState::MovingDown;
-            self.send_status(self.status());
+            self.send_status(LegStatus {
+                duty: duty.get(),
+                ..self.status()
+            });
         }
 
         while travel_in_direction(start_position, self.encoder_position(), direction) < steps as i32
@@ -877,9 +910,12 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                 if error <= runtime_config.target_slow_zone().get_i32() {
                     self.start_up_slow(runtime_config);
                 } else {
-                    self.drive_up_run(runtime_config);
+                    let duty = self.drive_up_run(runtime_config);
                     self.state.motion = MotionState::MovingUp;
-                    self.send_status(self.status());
+                    self.send_status(LegStatus {
+                        duty: duty.get(),
+                        ..self.status()
+                    });
                 }
             }
         } else if target_position < current_position {
@@ -903,9 +939,12 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                 if error <= runtime_config.target_slow_zone().get_i32() {
                     self.start_down_slow(runtime_config);
                 } else {
-                    self.drive_down_run(runtime_config);
+                    let duty = self.drive_down_run(runtime_config);
                     self.state.motion = MotionState::MovingDown;
-                    self.send_status(self.status());
+                    self.send_status(LegStatus {
+                        duty: duty.get(),
+                        ..self.status()
+                    });
                 }
             }
         } else {

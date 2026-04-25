@@ -44,6 +44,8 @@ pub struct DeskStatus {
     pub target_position: i32,
     pub left_position: i32,
     pub right_position: i32,
+    pub left_duty: u8,
+    pub right_duty: u8,
     pub average_position: i32,
     pub skew_counts: i32,
     pub min_position: i32,
@@ -582,11 +584,13 @@ impl DeskStatusState {
         self.update(|status| match side {
             DeskSide::Left => {
                 status.left_position = leg_status.position;
+                status.left_duty = leg_status.duty;
                 status.left_min_position = leg_status.min_position;
                 status.left_max_position = leg_status.max_position;
             }
             DeskSide::Right => {
                 status.right_position = leg_status.position;
+                status.right_duty = leg_status.duty;
                 status.right_min_position = leg_status.min_position;
                 status.right_max_position = leg_status.max_position;
             }
@@ -672,6 +676,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             target_position: 0,
             left_position,
             right_position,
+            left_duty: 0,
+            right_duty: 0,
             average_position: (left_position + right_position) / 2,
             skew_counts: (left_position - right_position).abs(),
             min_position: 0,
