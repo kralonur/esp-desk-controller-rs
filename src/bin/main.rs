@@ -20,7 +20,7 @@ use esp_hal::{
 use esp_pwm_motor::{
     config::RuntimeConfigStorage,
     controller::{DeskCommand, DeskControllerState},
-    desk::{Desk, DeskMoveOutcome, DeskStatusStorage, ReadyDesk, UnhomedDesk},
+    desk::{Desk, DeskMoveError, DeskMoveOutcome, DeskStatusStorage, ReadyDesk, UnhomedDesk},
     leg::{DriveSide, LegConfig, LegStatusStorage},
     motor::Motor,
     quadrature::{Quadrature, QuadratureDirection, QuadratureStorage},
@@ -160,7 +160,12 @@ async fn run_desk_control<
                                 control_state.finish_ready();
                                 DeskRuntime::Ready(desk)
                             }
-                            Err((desk, error)) => {
+                            Err(DeskMoveError::FaultedReady(desk, error)) => {
+                                warn!("move to {} failed: {:?}", target_position.get(), error);
+                                control_state.fault(error);
+                                DeskRuntime::Ready(desk)
+                            }
+                            Err(DeskMoveError::FaultedUnhomed(desk, error)) => {
                                 warn!("move to {} failed: {:?}", target_position.get(), error);
                                 control_state.fault(error);
                                 DeskRuntime::Unhomed(desk)
@@ -223,7 +228,12 @@ async fn run_desk_control<
                                     control_state.finish_ready();
                                     DeskRuntime::Ready(desk)
                                 }
-                                Err((desk, error)) => {
+                                Err(DeskMoveError::FaultedReady(desk, error)) => {
+                                    warn!("move by {} failed: {:?}", delta.get(), error);
+                                    control_state.fault(error);
+                                    DeskRuntime::Ready(desk)
+                                }
+                                Err(DeskMoveError::FaultedUnhomed(desk, error)) => {
                                     warn!("move by {} failed: {:?}", delta.get(), error);
                                     control_state.fault(error);
                                     DeskRuntime::Unhomed(desk)

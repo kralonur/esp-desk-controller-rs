@@ -7,7 +7,7 @@ use embassy_sync::{
 };
 
 use crate::config::{ObstructionSensitivity, RuntimeConfigReader};
-use crate::desk::{DeskError, DeskStatus, DeskStatusReader};
+use crate::desk::{DeskError, DeskMoveInvariant, DeskStatus, DeskStatusReader};
 use crate::units::{PositionCounts, RelativeCounts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
@@ -32,6 +32,7 @@ pub enum DeskFault {
     RightLeg(crate::leg::LegError),
     MoveTimeout,
     SkewFault,
+    InvariantViolation(DeskMoveInvariant),
     RehomeRequired,
 }
 
@@ -253,6 +254,7 @@ impl DeskFault {
             DeskError::RightLeg(error) => Some(Self::RightLeg(error)),
             DeskError::MoveTimeout => Some(Self::MoveTimeout),
             DeskError::SkewFault => Some(Self::SkewFault),
+            DeskError::InvariantViolation(invariant) => Some(Self::InvariantViolation(invariant)),
             DeskError::RehomeRequired => Some(Self::RehomeRequired),
             DeskError::Stopped => None,
         }

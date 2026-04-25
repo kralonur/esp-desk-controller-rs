@@ -25,7 +25,7 @@ use crate::{
         CommandSubmission, DeskControllerMode, DeskControllerSnapshot, DeskControllerState,
         DeskFault, StopSubmission,
     },
-    desk::{DeskMotionState, DeskStatusWatcher, DeskStopReason},
+    desk::{DeskMotionState, DeskMoveInvariant, DeskStatusWatcher, DeskStopReason},
     units::{CountDelta, DutyPercent, DutyPercentTrim, Percent, PositionCounts, RelativeCounts},
 };
 
@@ -1073,6 +1073,12 @@ fn fault_name(fault: Option<DeskFault>) -> &'static str {
         },
         Some(DeskFault::MoveTimeout) => "move_timeout",
         Some(DeskFault::SkewFault) => "skew_fault",
+        Some(DeskFault::InvariantViolation(DeskMoveInvariant::DirectionMismatch)) => {
+            "invariant_direction_mismatch"
+        }
+        Some(DeskFault::InvariantViolation(DeskMoveInvariant::WrongWayProgress)) => {
+            "invariant_wrong_way_progress"
+        }
         Some(DeskFault::RehomeRequired) => "rehome_required",
     }
 }

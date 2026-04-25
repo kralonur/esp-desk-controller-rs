@@ -60,6 +60,7 @@ pub enum DeskError {
     RightLeg(LegError),
     MoveTimeout,
     SkewFault,
+    InvariantViolation(DeskMoveInvariant),
     RehomeRequired,
     Stopped,
 }
@@ -69,6 +70,29 @@ pub enum DeskMoveOutcome {
     Completed,
     StoppedByRequest,
     StoppedByObstruction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+pub enum DeskMoveInvariant {
+    DirectionMismatch,
+    WrongWayProgress,
+}
+
+pub enum DeskMoveError<
+    'a,
+    const LEFT_OP: u8,
+    LeftPwm: PwmPeripheral,
+    const RIGHT_OP: u8,
+    RightPwm: PwmPeripheral,
+> {
+    FaultedReady(
+        Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
+        DeskError,
+    ),
+    FaultedUnhomed(
+        Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
+        DeskError,
+    ),
 }
 
 pub struct UnhomedDesk;
@@ -110,7 +134,7 @@ enum SyncPhase {
     PauseLead,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TravelDirection {
     Up,
     Down,
@@ -145,6 +169,25 @@ struct ObstructionMonitor {
     window_start_total_travel: i32,
     baseline_speed: u32,
     consecutive_slow_windows: u8,
+}
+
+struct MoveProgressMonitor {
+    warmup_counts: i32,
+    direction: TravelDirection,
+    start_average_position: i32,
+    max_forward_travel: i32,
+    retreat_counts: i32,
+    consecutive_wrong_way_samples: u8,
+}
+
+struct MoveStart {
+    target: i32,
+    direction: TravelDirection,
+}
+
+enum MoveStepValidation {
+    Continue(MoveSnapshot),
+    Completed,
 }
 
 #[derive(Clone, Copy)]
@@ -240,6 +283,46 @@ impl TravelDirection {
     }
 }
 
+impl MoveProgressMonitor {
+    fn new(config: DeskConfig, direction: TravelDirection, average_position: i32) -> Self {
+        let warmup_counts = config.obstruction_warmup_counts().get_i32();
+        Self {
+            warmup_counts,
+            direction,
+            start_average_position: average_position,
+            max_forward_travel: 0,
+            retreat_counts: warmup_counts,
+            consecutive_wrong_way_samples: 0,
+        }
+    }
+
+    fn observe(&mut self, average_position: i32) -> Option<DeskMoveInvariant> {
+        let forward_travel = match self.direction {
+            TravelDirection::Up => average_position - self.start_average_position,
+            TravelDirection::Down => self.start_average_position - average_position,
+        }
+        .max(0);
+        self.max_forward_travel = self.max_forward_travel.max(forward_travel);
+
+        if self.max_forward_travel < self.warmup_counts {
+            self.consecutive_wrong_way_samples = 0;
+            return None;
+        }
+
+        let moved_wrong_way =
+            self.max_forward_travel.saturating_sub(forward_travel) >= self.retreat_counts;
+
+        if moved_wrong_way {
+            self.consecutive_wrong_way_samples =
+                self.consecutive_wrong_way_samples.saturating_add(1);
+        } else {
+            self.consecutive_wrong_way_samples = 0;
+        }
+
+        (self.consecutive_wrong_way_samples >= 2).then_some(DeskMoveInvariant::WrongWayProgress)
+    }
+}
+
 impl MoveSnapshot {
     fn new(
         config: DeskConfig,
@@ -283,6 +366,64 @@ impl MoveSnapshot {
     fn suspends_obstruction_detection(self, phase: SyncPhase) -> bool {
         !matches!(phase, SyncPhase::Balanced) || self.left.near_target || self.right.near_target
     }
+}
+
+fn average_position(left_position: i32, right_position: i32) -> i32 {
+    (left_position + right_position) / 2
+}
+
+fn validate_move_start(
+    status: DeskStatus,
+    target_position: PositionCounts,
+    config: DeskConfig,
+) -> Result<MoveStart, DeskMoveOutcome> {
+    let target = target_position
+        .clamp(
+            PositionCounts::new(status.min_position),
+            PositionCounts::new(status.max_position),
+        )
+        .get();
+
+    if (target - status.average_position).abs() <= config.target_tolerance().get_i32() {
+        return Err(DeskMoveOutcome::Completed);
+    }
+
+    let Some(direction) = TravelDirection::from_target(target, status.average_position) else {
+        return Err(DeskMoveOutcome::Completed);
+    };
+
+    match direction {
+        TravelDirection::Up if target <= status.average_position => Err(DeskMoveOutcome::Completed),
+        TravelDirection::Down if target >= status.average_position => {
+            Err(DeskMoveOutcome::Completed)
+        }
+        _ => Ok(MoveStart { target, direction }),
+    }
+}
+
+fn validate_move_step(
+    config: DeskConfig,
+    direction: TravelDirection,
+    target: i32,
+    left_position: i32,
+    right_position: i32,
+    progress_monitor: &mut MoveProgressMonitor,
+) -> Result<MoveStepValidation, DeskError> {
+    let snapshot = MoveSnapshot::new(config, direction, target, left_position, right_position);
+    if snapshot.is_complete() {
+        return Ok(MoveStepValidation::Completed);
+    }
+
+    if snapshot.is_skew_fault(config) {
+        return Err(DeskError::SkewFault);
+    }
+
+    let average_position = average_position(left_position, right_position);
+    if let Some(invariant) = progress_monitor.observe(average_position) {
+        return Err(DeskError::InvariantViolation(invariant));
+    }
+
+    Ok(MoveStepValidation::Continue(snapshot))
 }
 
 impl ObstructionMonitor {
@@ -970,6 +1111,22 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         (self.into_unhomed(), error)
     }
 
+    fn fault_ready_move(
+        mut self,
+        error: DeskError,
+    ) -> (
+        Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
+        DeskError,
+    ) {
+        self.stop_ready_legs();
+        self.update_status(|status| {
+            status.motion = DeskMotionState::Idle;
+            status.last_stop_reason = DeskStopReason::None;
+            status.target_active = false;
+        });
+        (self, error)
+    }
+
     pub fn stop_with_reason(&mut self, reason: DeskStopReason) {
         self.stop_ready_legs();
         self.update_status(|status| {
@@ -988,10 +1145,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
             DeskMoveOutcome,
         ),
-        (
-            Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
-            DeskError,
-        ),
+        DeskMoveError<'a, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>,
     >
     where
         StopRequested: Fn() -> bool,
@@ -1001,7 +1155,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         let leg_config = runtime_config.leg();
         let status = self.status();
         if !status.homed || status.needs_rehome {
-            return Err(self.fail_move(DeskError::RehomeRequired));
+            let (desk, error) = self.fail_move(DeskError::RehomeRequired);
+            return Err(DeskMoveError::FaultedUnhomed(desk, error));
         }
 
         if stop_requested() {
@@ -1009,23 +1164,16 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             return Ok((self, DeskMoveOutcome::StoppedByRequest));
         }
 
-        let shared_target = target_position
-            .clamp(
-                PositionCounts::new(status.min_position),
-                PositionCounts::new(status.max_position),
-            )
-            .get();
-        if (shared_target - status.average_position).abs()
-            <= desk_config.target_tolerance().get_i32()
-        {
-            self.stop_with_reason(DeskStopReason::TargetReached);
-            return Ok((self, DeskMoveOutcome::Completed));
-        }
-
-        let Some(direction) = TravelDirection::from_target(shared_target, status.average_position)
-        else {
-            self.stop_with_reason(DeskStopReason::TargetReached);
-            return Ok((self, DeskMoveOutcome::Completed));
+        let MoveStart {
+            target: shared_target,
+            direction,
+        } = match validate_move_start(status, target_position, desk_config) {
+            Ok(start) => start,
+            Err(DeskMoveOutcome::Completed) => {
+                self.stop_with_reason(DeskStopReason::TargetReached);
+                return Ok((self, DeskMoveOutcome::Completed));
+            }
+            Err(outcome) => return Ok((self, outcome)),
         };
 
         self.update_status(|status| {
@@ -1072,6 +1220,11 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             left_status.position,
             right_status.position,
         );
+        let mut progress_monitor = MoveProgressMonitor::new(
+            desk_config,
+            direction,
+            average_position(left_status.position, right_status.position),
+        );
 
         loop {
             if stop_requested() {
@@ -1090,25 +1243,35 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             {
                 Ok(Either::First(progress)) => left_status.position = progress.position,
                 Ok(Either::Second(progress)) => right_status.position = progress.position,
-                Err(_) => return Err(self.fail_move(DeskError::MoveTimeout)),
+                Err(_) => {
+                    let (desk, error) = self.fail_move(DeskError::MoveTimeout);
+                    return Err(DeskMoveError::FaultedUnhomed(desk, error));
+                }
             };
 
-            let snapshot = MoveSnapshot::new(
+            let snapshot = match validate_move_step(
                 desk_config,
                 direction,
                 shared_target,
                 left_status.position,
                 right_status.position,
-            );
-
-            if snapshot.is_complete() {
-                self.stop_with_reason(DeskStopReason::TargetReached);
-                return Ok((self, DeskMoveOutcome::Completed));
-            }
-
-            if snapshot.is_skew_fault(desk_config) {
-                return Err(self.fail_move(DeskError::SkewFault));
-            }
+                &mut progress_monitor,
+            ) {
+                Ok(MoveStepValidation::Completed) => {
+                    self.stop_with_reason(DeskStopReason::TargetReached);
+                    return Ok((self, DeskMoveOutcome::Completed));
+                }
+                Ok(MoveStepValidation::Continue(snapshot)) => snapshot,
+                Err(DeskError::InvariantViolation(invariant)) => {
+                    let error = DeskError::InvariantViolation(invariant);
+                    let (desk, error) = self.fault_ready_move(error);
+                    return Err(DeskMoveError::FaultedReady(desk, error));
+                }
+                Err(error) => {
+                    let (desk, error) = self.fail_move(error);
+                    return Err(DeskMoveError::FaultedUnhomed(desk, error));
+                }
+            };
 
             sync_phase = next_sync_phase(desk_config, sync_phase, snapshot.observed_skew_abs);
             let (left_leg, right_leg) = self.ready_legs_mut();
