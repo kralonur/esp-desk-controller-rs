@@ -772,6 +772,108 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             }
         };
 
+        let left_direction = left_leg.down_direction();
+        let right_direction = right_leg.down_direction();
+        let left_up_direction = left_leg.up_direction();
+        let right_up_direction = right_leg.up_direction();
+        let alignment_tolerance = desk_config.sync_speedup_exit_counts().get_i32();
+
+        let initial_left_position = left_leg.logical_encoder_position();
+        let initial_right_position = right_leg.logical_encoder_position();
+        if initial_left_position > initial_right_position + alignment_tolerance {
+            right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+            left_leg.apply_drive_mode(DriveMode::HomeDown, leg_config);
+            let mut last_position = left_leg.encoder_position();
+            let mut last_progress = Instant::now();
+
+            while left_leg.logical_encoder_position() > initial_right_position + alignment_tolerance
+            {
+                if stop_requested() {
+                    left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    return Err(self.restore_unhomed(left_leg, right_leg, DeskError::Stopped));
+                }
+
+                Timer::after(desk_config.homing_poll_interval()).await;
+                let current_position = left_leg.encoder_position();
+                if progressed_in_direction(last_position, current_position, left_direction) {
+                    last_position = current_position;
+                    last_progress = Instant::now();
+                } else if progressed_in_direction(
+                    last_position,
+                    current_position,
+                    left_up_direction,
+                ) {
+                    left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    return Err(self.restore_unhomed(
+                        left_leg,
+                        right_leg,
+                        DeskError::LeftLeg(LegError::PolarityMismatch),
+                    ));
+                } else if Instant::now().saturating_duration_since(last_progress)
+                    >= desk_config.homing_stall_timeout()
+                {
+                    left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    return Err(self.restore_unhomed(
+                        left_leg,
+                        right_leg,
+                        DeskError::LeftLeg(LegError::MoveTimeout),
+                    ));
+                }
+            }
+
+            left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+            right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+        } else if initial_right_position > initial_left_position + alignment_tolerance {
+            left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+            right_leg.apply_drive_mode(DriveMode::HomeDown, leg_config);
+            let mut last_position = right_leg.encoder_position();
+            let mut last_progress = Instant::now();
+
+            while right_leg.logical_encoder_position() > initial_left_position + alignment_tolerance
+            {
+                if stop_requested() {
+                    left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    return Err(self.restore_unhomed(left_leg, right_leg, DeskError::Stopped));
+                }
+
+                Timer::after(desk_config.homing_poll_interval()).await;
+                let current_position = right_leg.encoder_position();
+                if progressed_in_direction(last_position, current_position, right_direction) {
+                    last_position = current_position;
+                    last_progress = Instant::now();
+                } else if progressed_in_direction(
+                    last_position,
+                    current_position,
+                    right_up_direction,
+                ) {
+                    left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    return Err(self.restore_unhomed(
+                        left_leg,
+                        right_leg,
+                        DeskError::RightLeg(LegError::PolarityMismatch),
+                    ));
+                } else if Instant::now().saturating_duration_since(last_progress)
+                    >= desk_config.homing_stall_timeout()
+                {
+                    left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                    return Err(self.restore_unhomed(
+                        left_leg,
+                        right_leg,
+                        DeskError::RightLeg(LegError::MoveTimeout),
+                    ));
+                }
+            }
+
+            left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+            right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+        }
+
         let left_start = left_leg.encoder_position();
         let right_start = right_leg.encoder_position();
         let homing_start_deadline = Instant::now() + desk_config.homing_start_timeout();
@@ -779,10 +881,6 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         left_leg.apply_drive_mode(DriveMode::DownBoost, leg_config);
         right_leg.apply_drive_mode(DriveMode::DownBoost, leg_config);
 
-        let left_direction = left_leg.down_direction();
-        let right_direction = right_leg.down_direction();
-        let left_up_direction = left_leg.up_direction();
-        let right_up_direction = right_leg.up_direction();
         let mut left_started = false;
         let mut right_started = false;
 
@@ -1435,29 +1533,22 @@ fn plan_move(
 }
 
 fn plan_homing_down(config: DeskConfig, phase: SyncPhase, lead_left: bool) -> DualLegPlan {
-    let left_plan = if matches!(phase, SyncPhase::PauseLead) && lead_left {
-        LegPlan::Stop
-    } else {
-        LegPlan::HomeDown(clamp_drive_duty(
-            config,
-            config.homing_run_duty(),
-            sync_trim(phase, lead_left, config.homing_sync_duty_step()),
-        ))
-    };
-    let right_plan = if matches!(phase, SyncPhase::PauseLead) && !lead_left {
-        LegPlan::Stop
-    } else {
-        LegPlan::HomeDown(clamp_drive_duty(
-            config,
-            config.homing_run_duty(),
-            sync_trim(phase, !lead_left, config.homing_sync_duty_step()),
-        ))
-    };
-
     DualLegPlan {
-        left: left_plan,
-        right: right_plan,
+        left: plan_homing_leg(config, phase, lead_left),
+        right: plan_homing_leg(config, phase, !lead_left),
     }
+}
+
+fn plan_homing_leg(config: DeskConfig, phase: SyncPhase, is_leader: bool) -> LegPlan {
+    if matches!(phase, SyncPhase::PauseLead) && is_leader {
+        return LegPlan::HomeDown(config.min_move_duty());
+    }
+
+    LegPlan::HomeDown(clamp_drive_duty(
+        config,
+        config.homing_run_duty(),
+        sync_trim(phase, is_leader, config.homing_sync_duty_step()),
+    ))
 }
 
 fn apply_leg_plan<State, const OP: u8, PWM: PwmPeripheral>(

@@ -131,6 +131,10 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         self.quadrature_watcher.snapshot().position
     }
 
+    pub fn logical_encoder_position(&self) -> i32 {
+        self.position_sign().apply(self.encoder_position())
+    }
+
     pub fn reset_position(&self) {
         self.quadrature_watcher.reset_position();
     }
