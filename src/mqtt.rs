@@ -138,12 +138,6 @@ impl CommandTopic {
             Self::MoveBy => "move_by",
         }
     }
-
-    fn parse(topic: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|command| topic.ends_with(command.suffix()))
-    }
 }
 
 type MqttClient<'a> = Client<
@@ -508,19 +502,25 @@ fn handle_motion_command(
             }
         },
         CommandTopic::Up => match parse_i32(payload) {
-            Some(steps) => submission_response(
-                topic.response_name(),
-                state.submit_move_by(RelativeCounts::new(steps.abs())),
-                state.snapshot(),
-            ),
+            Some(steps) => match steps.checked_abs() {
+                Some(steps) => submission_response(
+                    topic.response_name(),
+                    state.submit_move_by(RelativeCounts::new(steps)),
+                    state.snapshot(),
+                ),
+                None => response_body(topic.response_name(), "invalid_payload", state.snapshot()),
+            },
             None => response_body(topic.response_name(), "invalid_payload", state.snapshot()),
         },
         CommandTopic::Down => match parse_i32(payload) {
-            Some(steps) => submission_response(
-                topic.response_name(),
-                state.submit_move_by(RelativeCounts::new(-steps.abs())),
-                state.snapshot(),
-            ),
+            Some(steps) => match steps.checked_abs() {
+                Some(steps) => submission_response(
+                    topic.response_name(),
+                    state.submit_move_by(RelativeCounts::new(-steps)),
+                    state.snapshot(),
+                ),
+                None => response_body(topic.response_name(), "invalid_payload", state.snapshot()),
+            },
             None => response_body(topic.response_name(), "invalid_payload", state.snapshot()),
         },
         CommandTopic::MoveTo => match parse_i32(payload) {
@@ -1232,7 +1232,17 @@ impl MqttSettings {
     }
 
     fn parse_incoming_topic<'a>(&'a self, topic: &'a str) -> Option<IncomingTopic<'a>> {
-        if let Some(command) = CommandTopic::parse(topic) {
+        let command = match topic {
+            topic if topic == self.topic_home => Some(CommandTopic::Home),
+            topic if topic == self.topic_stop => Some(CommandTopic::Stop),
+            topic if topic == self.topic_up => Some(CommandTopic::Up),
+            topic if topic == self.topic_down => Some(CommandTopic::Down),
+            topic if topic == self.topic_move_to => Some(CommandTopic::MoveTo),
+            topic if topic == self.topic_move_by => Some(CommandTopic::MoveBy),
+            _ => None,
+        };
+
+        if let Some(command) = command {
             return Some(IncomingTopic::Command(command));
         }
 
