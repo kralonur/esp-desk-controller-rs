@@ -26,6 +26,7 @@ use crate::{
         DeskFault, StopSubmission,
     },
     desk::{DeskMotionState, DeskMoveInvariant, DeskStatusWatcher, DeskStopReason},
+    persistent_config::RuntimeConfigPersistence,
     units::{CountDelta, DutyPercent, DutyPercentTrim, Percent, PositionCounts, RelativeCounts},
 };
 
@@ -97,6 +98,15 @@ struct IncomingResponse {
     publish_config: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfigPersistResult {
+    Disabled,
+    Saved,
+    Deferred,
+    Erased,
+    Failed,
+}
+
 #[derive(Clone, Copy)]
 enum CommandTopic {
     Home,
@@ -155,6 +165,7 @@ pub async fn mqtt_task(
     stack: Stack<'static>,
     state: &'static DeskControllerState,
     runtime_config_state: &'static RuntimeConfigState,
+    mut runtime_config_persistence: Option<&'static mut RuntimeConfigPersistence>,
     mut status_watcher: DeskStatusWatcher,
 ) -> ! {
     let settings = match MqttSettings::load() {
@@ -172,6 +183,7 @@ pub async fn mqtt_task(
             stack,
             state,
             runtime_config_state,
+            runtime_config_persistence.as_deref_mut(),
             &mut status_watcher,
             &settings,
         )
@@ -184,6 +196,7 @@ async fn run_mqtt_session(
     stack: Stack<'static>,
     state: &'static DeskControllerState,
     runtime_config_state: &'static RuntimeConfigState,
+    mut runtime_config_persistence: Option<&mut RuntimeConfigPersistence>,
     status_watcher: &mut DeskStatusWatcher,
     settings: &MqttSettings,
 ) {
@@ -294,9 +307,13 @@ async fn run_mqtt_session(
                     }
                 };
 
-                if let Some(response) =
-                    decode_command_event(state, runtime_config_state, settings, event)
-                {
+                if let Some(response) = decode_command_event(
+                    state,
+                    runtime_config_state,
+                    runtime_config_persistence.as_deref_mut(),
+                    settings,
+                    event,
+                ) {
                     if let Err(error) =
                         publish_response(&mut publisher_client, settings, &response.response).await
                     {
@@ -328,6 +345,26 @@ async fn run_mqtt_session(
                 if let Err(error) = publish_status(&mut publisher_client, settings, state).await {
                     warn!("mqtt status publish failed: {:?}", error);
                     return;
+                }
+                if let Some(response) = flush_deferred_config(
+                    state,
+                    runtime_config_state,
+                    runtime_config_persistence.as_deref_mut(),
+                ) {
+                    if let Err(error) =
+                        publish_response(&mut publisher_client, settings, &response.response).await
+                    {
+                        warn!("mqtt config persist response publish failed: {:?}", error);
+                        return;
+                    }
+                    if response.publish_config
+                        && let Err(error) =
+                            publish_config(&mut publisher_client, settings, runtime_config_state)
+                                .await
+                    {
+                        warn!("mqtt config publish failed: {:?}", error);
+                        return;
+                    }
                 }
             }
             Either3::Third(_) => {
@@ -426,6 +463,7 @@ async fn publish_message<'a>(
 fn decode_command_event(
     state: &DeskControllerState,
     runtime_config_state: &RuntimeConfigState,
+    runtime_config_persistence: Option<&mut RuntimeConfigPersistence>,
     settings: &MqttSettings,
     event: Event<'_, MQTT_MAX_SUBSCRIPTION_IDENTIFIERS>,
 ) -> Option<IncomingResponse> {
@@ -440,6 +478,7 @@ fn decode_command_event(
     Some(handle_incoming_topic(
         state,
         runtime_config_state,
+        runtime_config_persistence,
         incoming,
         payload,
     ))
@@ -448,6 +487,7 @@ fn decode_command_event(
 fn handle_incoming_topic(
     state: &DeskControllerState,
     runtime_config_state: &RuntimeConfigState,
+    runtime_config_persistence: Option<&mut RuntimeConfigPersistence>,
     topic: IncomingTopic<'_>,
     payload: &str,
 ) -> IncomingResponse {
@@ -463,11 +503,23 @@ fn handle_incoming_topic(
             publish_config: true,
         },
         IncomingTopic::ConfigReset => {
-            let result = runtime_config_state.replace(Default::default());
+            let persist_result = erase_persisted_config(runtime_config_persistence);
+            let result = if persist_result.is_ok() {
+                runtime_config_state.replace(Default::default())
+            } else {
+                Err(ConfigError::InvalidDeskConfig)
+            };
             IncomingResponse {
                 response: match result {
-                    Ok(_) => config_command_response("reset", "updated"),
-                    Err(error) => config_command_error_response("reset", config_error_name(error)),
+                    Ok(_) => config_reset_response("updated", persist_result.ok()),
+                    Err(error) => {
+                        let result = if persist_result.is_err() {
+                            "persist_failed"
+                        } else {
+                            config_error_name(error)
+                        };
+                        config_command_error_response("reset", result)
+                    }
                 },
                 publish_status: true,
                 publish_config: result.is_ok(),
@@ -475,8 +527,17 @@ fn handle_incoming_topic(
         }
         IncomingTopic::ConfigSet(field_path) => {
             let result = handle_config_set(runtime_config_state, field_path, payload);
+            let persist_result = if result.is_ok() {
+                Some(save_or_defer_config(
+                    state,
+                    runtime_config_state,
+                    runtime_config_persistence,
+                ))
+            } else {
+                None
+            };
             IncomingResponse {
-                response: config_set_response(field_path, result),
+                response: config_set_response(field_path, result, persist_result),
                 publish_status: result.is_ok(),
                 publish_config: result.is_ok(),
             }
@@ -716,16 +777,107 @@ fn config_command_error_response(command: &'static str, result: &'static str) ->
     config_command_response(command, result)
 }
 
-fn config_set_response(field_path: &str, result: Result<(), &'static str>) -> String {
+fn config_reset_response(result: &'static str, persist: Option<ConfigPersistResult>) -> String {
+    format!(
+        "command=config_reset\nresult={}\npersist={}\n",
+        result,
+        persist_result_name(persist)
+    )
+}
+
+fn config_set_response(
+    field_path: &str,
+    result: Result<(), &'static str>,
+    persist: Option<ConfigPersistResult>,
+) -> String {
     let result_name = match result {
         Ok(()) => "updated",
         Err(error) => error,
     };
 
     format!(
-        "command=config_set\nfield={}\nresult={}\napplies_on_next_command=true\n",
-        field_path, result_name
+        "command=config_set\nfield={}\nresult={}\npersist={}\napplies_on_next_command=true\n",
+        field_path,
+        result_name,
+        persist_result_name(persist)
     )
+}
+
+fn persist_result_name(result: Option<ConfigPersistResult>) -> &'static str {
+    match result {
+        Some(ConfigPersistResult::Disabled) => "disabled",
+        Some(ConfigPersistResult::Saved) => "saved",
+        Some(ConfigPersistResult::Deferred) => "deferred",
+        Some(ConfigPersistResult::Erased) => "erased",
+        Some(ConfigPersistResult::Failed) => "failed",
+        None => "unchanged",
+    }
+}
+
+fn save_or_defer_config(
+    state: &DeskControllerState,
+    runtime_config_state: &RuntimeConfigState,
+    persistence: Option<&mut RuntimeConfigPersistence>,
+) -> ConfigPersistResult {
+    let Some(persistence) = persistence else {
+        return ConfigPersistResult::Disabled;
+    };
+
+    if !state.can_persist_config() {
+        persistence.mark_dirty();
+        return ConfigPersistResult::Deferred;
+    }
+
+    match persistence.save(runtime_config_state.current()) {
+        Ok(()) => ConfigPersistResult::Saved,
+        Err(error) => {
+            warn!("runtime config save failed: {:?}", error);
+            persistence.mark_dirty();
+            ConfigPersistResult::Failed
+        }
+    }
+}
+
+fn flush_deferred_config(
+    state: &DeskControllerState,
+    runtime_config_state: &RuntimeConfigState,
+    persistence: Option<&mut RuntimeConfigPersistence>,
+) -> Option<IncomingResponse> {
+    let persistence = persistence?;
+    if !persistence.is_dirty() || !state.can_persist_config() {
+        return None;
+    }
+
+    let persist_result = save_or_defer_config(state, runtime_config_state, Some(persistence));
+    Some(IncomingResponse {
+        response: format!(
+            "command=config_persist\nresult={}\npersist={}\n",
+            if matches!(persist_result, ConfigPersistResult::Saved) {
+                "updated"
+            } else {
+                "persist_failed"
+            },
+            persist_result_name(Some(persist_result))
+        ),
+        publish_status: false,
+        publish_config: matches!(persist_result, ConfigPersistResult::Saved),
+    })
+}
+
+fn erase_persisted_config(
+    persistence: Option<&mut RuntimeConfigPersistence>,
+) -> Result<ConfigPersistResult, ()> {
+    let Some(persistence) = persistence else {
+        return Ok(ConfigPersistResult::Disabled);
+    };
+
+    match persistence.erase() {
+        Ok(()) => Ok(ConfigPersistResult::Erased),
+        Err(error) => {
+            warn!("runtime config erase failed: {:?}", error);
+            Err(())
+        }
+    }
 }
 
 fn handle_config_set(
@@ -1332,12 +1484,14 @@ pub fn spawn_mqtt(
     stack: Stack<'static>,
     state: &'static DeskControllerState,
     runtime_config_state: &'static RuntimeConfigState,
+    runtime_config_persistence: Option<&'static mut RuntimeConfigPersistence>,
     status_watcher: DeskStatusWatcher,
 ) {
     spawner.must_spawn(mqtt_task(
         stack,
         state,
         runtime_config_state,
+        runtime_config_persistence,
         status_watcher,
     ));
 }

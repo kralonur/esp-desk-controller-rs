@@ -198,6 +198,15 @@ impl DeskControllerState {
         self.update_snapshot(|snapshot| snapshot.stop_requested = false);
     }
 
+    pub fn can_persist_config(&self) -> bool {
+        let snapshot = self.snapshot();
+        !snapshot.command_pending
+            && !matches!(
+                snapshot.mode,
+                DeskControllerMode::Homing | DeskControllerMode::Moving
+            )
+    }
+
     fn submit_motion(&self, command: DeskCommand) -> CommandSubmission {
         let snapshot = self.snapshot();
         if snapshot.command_pending

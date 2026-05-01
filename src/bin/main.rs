@@ -19,11 +19,12 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 use esp_pwm_motor::{
-    config::RuntimeConfigStorage,
+    config::{RuntimeConfig, RuntimeConfigStorage},
     controller::{DeskCommand, DeskControllerState},
     desk::{Desk, DeskMoveError, DeskMoveOutcome, DeskStatusStorage, ReadyDesk, UnhomedDesk},
     leg::{DriveSide, LegConfig, LegStatusStorage},
     motor::Motor,
+    persistent_config::{PersistError, RuntimeConfigPersistence},
     quadrature::{Quadrature, QuadratureDirection, QuadratureStorage},
     units::{PWM_TIMER_MAX_TICKS, PositionCounts, RelativeCounts},
 };
@@ -260,12 +261,40 @@ async fn main(spawner: Spawner) -> ! {
     static LEG2_STATUS_STORAGE: LegStatusStorage = LegStatusStorage::new();
     static DESK_STATUS_STORAGE: DeskStatusStorage = DeskStatusStorage::new();
     static RUNTIME_CONFIG_STORAGE: RuntimeConfigStorage = RuntimeConfigStorage::new();
+    static RUNTIME_CONFIG_PERSISTENCE_STORAGE: StaticCell<RuntimeConfigPersistence> =
+        StaticCell::new();
     static DESK_CONTROL_STATE_STORAGE: StaticCell<DeskControllerState> = StaticCell::new();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 65536);
+
+    let mut runtime_config_persistence: Option<&'static mut RuntimeConfigPersistence> =
+        match RuntimeConfigPersistence::new(peripherals.FLASH) {
+            Ok(persistence) => Some(RUNTIME_CONFIG_PERSISTENCE_STORAGE.init(persistence)),
+            Err(error) => {
+                warn!("persistent config storage unavailable: {:?}", error);
+                None
+            }
+        };
+    let initial_runtime_config = match runtime_config_persistence.as_deref_mut() {
+        Some(persistence) => match persistence.load() {
+            Ok(config) => {
+                info!("loaded runtime config from flash");
+                config
+            }
+            Err(PersistError::Missing) => {
+                info!("no saved runtime config found");
+                RuntimeConfig::default()
+            }
+            Err(error) => {
+                warn!("saved runtime config ignored: {:?}", error);
+                RuntimeConfig::default()
+            }
+        },
+        None => RuntimeConfig::default(),
+    };
 
     let leg_1_left_enable_pin = peripherals.GPIO4;
     let leg_1_right_enable_pin = peripherals.GPIO3;
@@ -358,7 +387,7 @@ async fn main(spawner: Spawner) -> ! {
     motor_2.enable();
     info!("motors and quadrature initialized");
 
-    let runtime_config_state = RUNTIME_CONFIG_STORAGE.init(Default::default());
+    let runtime_config_state = RUNTIME_CONFIG_STORAGE.init(initial_runtime_config);
     let runtime_config_reader = runtime_config_state.reader();
 
     let leg_1 = esp_pwm_motor::leg::Leg::new(
@@ -412,6 +441,7 @@ async fn main(spawner: Spawner) -> ! {
         stack,
         control_state,
         runtime_config_state,
+        runtime_config_persistence,
         mqtt_status_watcher,
     );
     info!("entering desk control loop");

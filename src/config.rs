@@ -661,6 +661,10 @@ impl RuntimeConfig {
         }
     }
 
+    pub const fn from_parts(desk: DeskConfig, leg: LegRuntimeConfig) -> Result<Self, ConfigError> {
+        Self { desk, leg }.validate()
+    }
+
     pub const fn desk(self) -> DeskConfig {
         self.desk
     }
