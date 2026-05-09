@@ -5,16 +5,32 @@ use embassy_sync::{
     blocking_mutex::{Mutex, raw::CriticalSectionRawMutex},
     channel::Channel,
 };
+use embassy_time::{Duration, Instant};
 
 use crate::config::{ObstructionSensitivity, RuntimeConfigReader};
-use crate::desk::{DeskError, DeskMoveInvariant, DeskStatus, DeskStatusReader};
-use crate::units::{PositionCounts, RelativeCounts};
+use crate::desk::{
+    DeskError, DeskLegSide, DeskMoveInvariant, DeskStatus, DeskStatusReader, OverrideLegDirection,
+};
+use crate::units::{CountDelta, PositionCounts, RelativeCounts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub enum DeskCommand {
     Home,
     MoveTo(PositionCounts),
     MoveBy(RelativeCounts),
+    Override(OverrideCommand),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+pub enum OverrideCommand {
+    Home {
+        side: DeskLegSide,
+    },
+    Move {
+        side: DeskLegSide,
+        direction: OverrideLegDirection,
+        steps: CountDelta,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
@@ -23,6 +39,7 @@ pub enum DeskControllerMode {
     Ready,
     Homing,
     Moving,
+    Override,
     Faulted,
 }
 
@@ -50,6 +67,8 @@ pub enum CommandSubmission {
     RejectedBusy,
     RejectedUnhomed,
     RejectedFaulted,
+    RejectedLocked,
+    RejectedOverrideUnlocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +80,7 @@ pub enum StopSubmission {
 pub struct DeskControllerState {
     commands: Channel<CriticalSectionRawMutex, DeskCommand, 1>,
     snapshot: Mutex<CriticalSectionRawMutex, Cell<DeskControllerSnapshot>>,
+    override_unlocked_until: Mutex<CriticalSectionRawMutex, Cell<Option<Instant>>>,
     status_reader: DeskStatusReader,
     runtime_config_reader: RuntimeConfigReader,
 }
@@ -78,6 +98,7 @@ impl DeskControllerState {
                 stop_requested: false,
                 last_fault: None,
             })),
+            override_unlocked_until: Mutex::new(Cell::new(None)),
             status_reader,
             runtime_config_reader,
         }
@@ -98,15 +119,47 @@ impl DeskControllerState {
             .obstruction_sensitivity()
     }
 
+    pub fn override_unlocked(&self) -> bool {
+        let now = Instant::now();
+        self.override_unlocked_until.lock(|until| {
+            let unlocked = until.get().is_some_and(|expires_at| now < expires_at);
+            if !unlocked {
+                until.set(None);
+            }
+            unlocked
+        })
+    }
+
+    pub fn unlock_override(&self) -> Duration {
+        let timeout = self
+            .runtime_config_reader
+            .current()
+            .desk()
+            .override_unlock_timeout();
+        self.override_unlocked_until
+            .lock(|until| until.set(Some(Instant::now() + timeout)));
+        timeout
+    }
+
+    pub fn lock_override(&self) {
+        self.override_unlocked_until.lock(|until| until.set(None));
+    }
+
     pub fn submit_home(&self) -> CommandSubmission {
         let snapshot = self.snapshot();
         if snapshot.command_pending
             || matches!(
                 snapshot.mode,
-                DeskControllerMode::Homing | DeskControllerMode::Moving
+                DeskControllerMode::Homing
+                    | DeskControllerMode::Moving
+                    | DeskControllerMode::Override
             )
         {
             return CommandSubmission::RejectedBusy;
+        }
+
+        if self.override_unlocked() {
+            return CommandSubmission::RejectedOverrideUnlocked;
         }
 
         if self.try_queue(DeskCommand::Home) {
@@ -124,12 +177,31 @@ impl DeskControllerState {
         self.submit_motion(DeskCommand::MoveBy(delta))
     }
 
+    pub fn submit_override_home(&self, side: DeskLegSide) -> CommandSubmission {
+        self.submit_override(OverrideCommand::Home { side })
+    }
+
+    pub fn submit_override_move(
+        &self,
+        side: DeskLegSide,
+        direction: OverrideLegDirection,
+        steps: CountDelta,
+    ) -> CommandSubmission {
+        self.submit_override(OverrideCommand::Move {
+            side,
+            direction,
+            steps,
+        })
+    }
+
     pub fn submit_stop(&self) -> StopSubmission {
         let snapshot = self.snapshot();
         if snapshot.command_pending
             || matches!(
                 snapshot.mode,
-                DeskControllerMode::Homing | DeskControllerMode::Moving
+                DeskControllerMode::Homing
+                    | DeskControllerMode::Moving
+                    | DeskControllerMode::Override
             )
         {
             self.update_snapshot(|snapshot| snapshot.stop_requested = true);
@@ -158,6 +230,13 @@ impl DeskControllerState {
             snapshot.mode = DeskControllerMode::Moving;
             snapshot.command_pending = false;
             snapshot.stop_requested = false;
+        });
+    }
+
+    pub fn begin_override(&self) {
+        self.update_snapshot(|snapshot| {
+            snapshot.mode = DeskControllerMode::Override;
+            snapshot.command_pending = false;
         });
     }
 
@@ -203,7 +282,9 @@ impl DeskControllerState {
         !snapshot.command_pending
             && !matches!(
                 snapshot.mode,
-                DeskControllerMode::Homing | DeskControllerMode::Moving
+                DeskControllerMode::Homing
+                    | DeskControllerMode::Moving
+                    | DeskControllerMode::Override
             )
     }
 
@@ -212,10 +293,16 @@ impl DeskControllerState {
         if snapshot.command_pending
             || matches!(
                 snapshot.mode,
-                DeskControllerMode::Homing | DeskControllerMode::Moving
+                DeskControllerMode::Homing
+                    | DeskControllerMode::Moving
+                    | DeskControllerMode::Override
             )
         {
             return CommandSubmission::RejectedBusy;
+        }
+
+        if self.override_unlocked() {
+            return CommandSubmission::RejectedOverrideUnlocked;
         }
 
         match snapshot.mode {
@@ -228,9 +315,33 @@ impl DeskControllerState {
             }
             DeskControllerMode::Faulted => CommandSubmission::RejectedFaulted,
             DeskControllerMode::Unhomed => CommandSubmission::RejectedUnhomed,
-            DeskControllerMode::Homing | DeskControllerMode::Moving => {
-                CommandSubmission::RejectedBusy
-            }
+            DeskControllerMode::Homing
+            | DeskControllerMode::Moving
+            | DeskControllerMode::Override => CommandSubmission::RejectedBusy,
+        }
+    }
+
+    fn submit_override(&self, command: OverrideCommand) -> CommandSubmission {
+        let snapshot = self.snapshot();
+        if snapshot.command_pending
+            || matches!(
+                snapshot.mode,
+                DeskControllerMode::Homing
+                    | DeskControllerMode::Moving
+                    | DeskControllerMode::Override
+            )
+        {
+            return CommandSubmission::RejectedBusy;
+        }
+
+        if !self.override_unlocked() {
+            return CommandSubmission::RejectedLocked;
+        }
+
+        if self.try_queue(DeskCommand::Override(command)) {
+            CommandSubmission::Accepted
+        } else {
+            CommandSubmission::RejectedBusy
         }
     }
 

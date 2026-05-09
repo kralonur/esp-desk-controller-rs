@@ -36,6 +36,7 @@ const DEFAULT_MEDIUM_OBSTRUCTION_PROFILE: ObstructionProfileConfig =
     ObstructionProfileConfig::new(Percent::new(70), 2);
 const DEFAULT_HIGH_OBSTRUCTION_PROFILE: ObstructionProfileConfig =
     ObstructionProfileConfig::new(Percent::new(80), 2);
+const DEFAULT_OVERRIDE_UNLOCK_TIMEOUT: Duration = Duration::from_millis(120_000);
 
 const DEFAULT_LEG_STARTUP_DUTY: DutyPercent = DutyPercent::new(100);
 const DEFAULT_LEG_MAX_DUTY: DutyPercent = DutyPercent::new(100);
@@ -100,6 +101,7 @@ pub struct DeskConfig {
     low_obstruction_profile: ObstructionProfileConfig,
     medium_obstruction_profile: ObstructionProfileConfig,
     high_obstruction_profile: ObstructionProfileConfig,
+    override_unlock_timeout: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +170,7 @@ impl DeskConfig {
             low_obstruction_profile: DEFAULT_LOW_OBSTRUCTION_PROFILE,
             medium_obstruction_profile: DEFAULT_MEDIUM_OBSTRUCTION_PROFILE,
             high_obstruction_profile: DEFAULT_HIGH_OBSTRUCTION_PROFILE,
+            override_unlock_timeout: DEFAULT_OVERRIDE_UNLOCK_TIMEOUT,
         };
         assert!(config.is_valid(), "invalid default desk config");
         config
@@ -183,6 +186,7 @@ impl DeskConfig {
 
     const fn is_valid(self) -> bool {
         self.move_timeout.as_millis() > default_obstruction_detection_time_ms(self)
+            && self.override_unlock_timeout.as_millis() > 0
     }
 
     fn update_checked(&mut self, update_fn: impl FnOnce(&mut Self)) -> Result<(), ConfigError> {
@@ -274,6 +278,10 @@ impl DeskConfig {
             ObstructionSensitivity::Medium => Some(self.medium_obstruction_profile),
             ObstructionSensitivity::High => Some(self.high_obstruction_profile),
         }
+    }
+
+    pub fn override_unlock_timeout(self) -> Duration {
+        self.override_unlock_timeout
     }
 
     pub fn set_target_tolerance(&mut self, value: CountDelta) -> Result<(), ConfigError> {
@@ -390,6 +398,10 @@ impl DeskConfig {
         value: ObstructionProfileConfig,
     ) -> Result<(), ConfigError> {
         self.update_checked(|config| config.high_obstruction_profile = value)
+    }
+
+    pub fn set_override_unlock_timeout(&mut self, value: Duration) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.override_unlock_timeout = value)
     }
 
     pub fn move_timeout(self) -> Duration {

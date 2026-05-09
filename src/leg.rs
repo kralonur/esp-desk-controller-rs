@@ -94,6 +94,7 @@ pub enum DriveMode {
     UpRun,
     UpSlow,
     DownBoost,
+    DownRun,
     DownSlow,
     HomeDown,
 }
@@ -165,6 +166,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
             DriveMode::UpRun => self.drive_up_run(runtime_config),
             DriveMode::UpSlow => self.drive_up_slow(runtime_config),
             DriveMode::DownBoost => self.drive_down_boost(runtime_config),
+            DriveMode::DownRun => self.drive_down_run(runtime_config),
             DriveMode::DownSlow => self.drive_down_slow(runtime_config),
             DriveMode::HomeDown => self.drive_home_down(runtime_config),
         };
@@ -172,9 +174,10 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         let motion = match mode {
             DriveMode::Stop => MotionState::Idle,
             DriveMode::UpBoost | DriveMode::UpRun | DriveMode::UpSlow => MotionState::MovingUp,
-            DriveMode::DownBoost | DriveMode::DownSlow | DriveMode::HomeDown => {
-                MotionState::MovingDown
-            }
+            DriveMode::DownBoost
+            | DriveMode::DownRun
+            | DriveMode::DownSlow
+            | DriveMode::HomeDown => MotionState::MovingDown,
         };
 
         self.send_status(LegStatus {
@@ -512,13 +515,17 @@ impl LegProgressWatcher {
 impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
     fn status(&self) -> LegStatus {
         LegStatus {
-            position: self.logical_position(),
+            position: self.logical_encoder_position(),
             min_position: 0,
             max_position: 0,
             duty: 0,
             motion: MotionState::Idle,
             homed: false,
         }
+    }
+
+    pub fn publish_status(&self) {
+        self.send_status(self.status());
     }
 
     pub fn new(

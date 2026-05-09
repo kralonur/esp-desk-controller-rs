@@ -20,8 +20,11 @@ use esp_hal::{
 };
 use esp_pwm_motor::{
     config::{RuntimeConfig, RuntimeConfigStorage},
-    controller::{DeskCommand, DeskControllerState},
-    desk::{Desk, DeskMoveError, DeskMoveOutcome, DeskStatusStorage, ReadyDesk, UnhomedDesk},
+    controller::{DeskCommand, DeskControllerState, OverrideCommand},
+    desk::{
+        Desk, DeskMoveError, DeskMoveOutcome, DeskOverrideOutcome, DeskStatusStorage, ReadyDesk,
+        UnhomedDesk,
+    },
     leg::{DriveSide, LegConfig, LegStatusStorage},
     motor::Motor,
     persistent_config::{PersistError, RuntimeConfigPersistence},
@@ -243,6 +246,134 @@ async fn run_desk_control<
                             }
                         }
                     }
+                };
+            }
+            DeskCommand::Override(command) => {
+                if control_state.stop_requested() {
+                    control_state.clear_stop_request();
+                    info!("override command cancelled before start");
+                    control_state.finish_unhomed();
+                    continue;
+                }
+
+                control_state.begin_override();
+                desk = match command {
+                    OverrideCommand::Home { side } => match desk {
+                        DeskRuntime::Unhomed(desk) => {
+                            match desk
+                                .override_home_leg(side, || control_state.stop_requested())
+                                .await
+                            {
+                                Ok((desk, DeskOverrideOutcome::Completed)) => {
+                                    info!("override home completed for {:?}", side);
+                                    control_state.finish_unhomed();
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                                Ok((desk, DeskOverrideOutcome::StoppedByRequest)) => {
+                                    info!("override home stopped for {:?}", side);
+                                    control_state.finish_unhomed();
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                                Err((desk, error)) => {
+                                    warn!("override home failed for {:?}: {:?}", side, error);
+                                    control_state.fault(error);
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                            }
+                        }
+                        DeskRuntime::Ready(desk) => {
+                            match desk
+                                .override_home_leg(side, || control_state.stop_requested())
+                                .await
+                            {
+                                Ok((desk, DeskOverrideOutcome::Completed)) => {
+                                    info!("override home completed for {:?}", side);
+                                    control_state.finish_unhomed();
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                                Ok((desk, DeskOverrideOutcome::StoppedByRequest)) => {
+                                    info!("override home stopped for {:?}", side);
+                                    control_state.finish_unhomed();
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                                Err((desk, error)) => {
+                                    warn!("override home failed for {:?}: {:?}", side, error);
+                                    control_state.fault(error);
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                            }
+                        }
+                    },
+                    OverrideCommand::Move {
+                        side,
+                        direction,
+                        steps,
+                    } => match desk {
+                        DeskRuntime::Unhomed(desk) => {
+                            match desk
+                                .override_move_leg(side, direction, steps, || {
+                                    control_state.stop_requested()
+                                })
+                                .await
+                            {
+                                Ok((desk, DeskOverrideOutcome::Completed)) => {
+                                    info!(
+                                        "override move completed for {:?} {:?} {}",
+                                        side,
+                                        direction,
+                                        steps.get()
+                                    );
+                                    control_state.finish_unhomed();
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                                Ok((desk, DeskOverrideOutcome::StoppedByRequest)) => {
+                                    info!("override move stopped for {:?} {:?}", side, direction);
+                                    control_state.finish_unhomed();
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                                Err((desk, error)) => {
+                                    warn!(
+                                        "override move failed for {:?} {:?}: {:?}",
+                                        side, direction, error
+                                    );
+                                    control_state.fault(error);
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                            }
+                        }
+                        DeskRuntime::Ready(desk) => {
+                            match desk
+                                .override_move_leg(side, direction, steps, || {
+                                    control_state.stop_requested()
+                                })
+                                .await
+                            {
+                                Ok((desk, DeskOverrideOutcome::Completed)) => {
+                                    info!(
+                                        "override move completed for {:?} {:?} {}",
+                                        side,
+                                        direction,
+                                        steps.get()
+                                    );
+                                    control_state.finish_unhomed();
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                                Ok((desk, DeskOverrideOutcome::StoppedByRequest)) => {
+                                    info!("override move stopped for {:?} {:?}", side, direction);
+                                    control_state.finish_unhomed();
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                                Err((desk, error)) => {
+                                    warn!(
+                                        "override move failed for {:?} {:?}: {:?}",
+                                        side, direction, error
+                                    );
+                                    control_state.fault(error);
+                                    DeskRuntime::Unhomed(desk)
+                                }
+                            }
+                        }
+                    },
                 };
             }
         }

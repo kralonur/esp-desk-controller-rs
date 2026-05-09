@@ -25,7 +25,10 @@ use crate::{
         CommandSubmission, DeskControllerMode, DeskControllerSnapshot, DeskControllerState,
         DeskFault, StopSubmission,
     },
-    desk::{DeskMotionState, DeskMoveInvariant, DeskStatusWatcher, DeskStopReason},
+    desk::{
+        DeskLegSide, DeskMotionState, DeskMoveInvariant, DeskStatusWatcher, DeskStopReason,
+        OverrideLegDirection,
+    },
     persistent_config::RuntimeConfigPersistence,
     units::{CountDelta, DutyPercent, DutyPercentTrim, Percent, PositionCounts, RelativeCounts},
 };
@@ -71,6 +74,7 @@ struct MqttSettings {
     topic_down: String,
     topic_move_to: String,
     topic_move_by: String,
+    topic_override_all: String,
 }
 
 #[derive(Clone, Copy, Debug, defmt::Format)]
@@ -87,6 +91,7 @@ pub enum MqttSetupError {
 #[derive(Clone, Copy)]
 enum IncomingTopic<'a> {
     Command(CommandTopic),
+    Override(OverrideTopic),
     ConfigGet,
     ConfigReset,
     ConfigSet(&'a str),
@@ -115,6 +120,14 @@ enum CommandTopic {
     Down,
     MoveTo,
     MoveBy,
+}
+
+#[derive(Clone, Copy)]
+enum OverrideTopic {
+    Unlock,
+    Lock,
+    LegHome(DeskLegSide),
+    LegMove(DeskLegSide, OverrideLegDirection),
 }
 
 impl CommandTopic {
@@ -413,6 +426,9 @@ async fn subscribe_commands<'a>(
     client
         .subscribe(settings.config_set_topic_filter()?, subscription)
         .await?;
+    client
+        .subscribe(settings.override_topic_filter()?, subscription)
+        .await?;
     Ok(())
 }
 
@@ -494,6 +510,11 @@ fn handle_incoming_topic(
     match topic {
         IncomingTopic::Command(command) => IncomingResponse {
             response: handle_motion_command(state, command, payload),
+            publish_status: true,
+            publish_config: false,
+        },
+        IncomingTopic::Override(command) => IncomingResponse {
+            response: handle_override_command(state, command, payload),
             publish_status: true,
             publish_config: false,
         },
@@ -603,6 +624,72 @@ fn handle_motion_command(
     }
 }
 
+fn handle_override_command(
+    state: &DeskControllerState,
+    topic: OverrideTopic,
+    payload: &str,
+) -> String {
+    match topic {
+        OverrideTopic::Unlock => {
+            if payload != "UNLOCK" {
+                return override_response_body(
+                    "override_unlock",
+                    "invalid_payload",
+                    state.snapshot(),
+                    state.override_unlocked(),
+                );
+            }
+
+            let timeout = state.unlock_override();
+            format!(
+                "command=override_unlock\nresult=accepted\nmode={}\ncommand_pending={}\nstop_requested={}\nlast_fault={}\noverride_unlocked=true\noverride_unlock_timeout_ms={}\n",
+                controller_mode_name(state.snapshot().mode),
+                bool_name(state.snapshot().command_pending),
+                bool_name(state.snapshot().stop_requested),
+                fault_name(state.snapshot().last_fault),
+                timeout.as_millis(),
+            )
+        }
+        OverrideTopic::Lock => {
+            state.lock_override();
+            override_response_body("override_lock", "accepted", state.snapshot(), false)
+        }
+        OverrideTopic::LegHome(side) => override_submission_response(
+            "override_leg_home",
+            state.submit_override_home(side),
+            state.snapshot(),
+            state.override_unlocked(),
+            Some(side),
+            None,
+        ),
+        OverrideTopic::LegMove(side, direction) => match parse_override_steps(payload) {
+            Ok(steps) => override_submission_response(
+                "override_leg_move",
+                state.submit_override_move(side, direction, steps),
+                state.snapshot(),
+                state.override_unlocked(),
+                Some(side),
+                Some(direction),
+            ),
+            Err(error) => {
+                let mut body = override_response_body(
+                    "override_leg_move",
+                    error,
+                    state.snapshot(),
+                    state.override_unlocked(),
+                );
+                body.push_str("leg=");
+                body.push_str(leg_side_name(side));
+                body.push('\n');
+                body.push_str("direction=");
+                body.push_str(override_direction_name(direction));
+                body.push('\n');
+                body
+            }
+        },
+    }
+}
+
 fn parse_i32(value: &str) -> Option<i32> {
     i32::from_str(value).ok()
 }
@@ -644,9 +731,42 @@ fn submission_response(
         CommandSubmission::RejectedBusy => "rejected_busy",
         CommandSubmission::RejectedUnhomed => "rejected_unhomed",
         CommandSubmission::RejectedFaulted => "rejected_faulted",
+        CommandSubmission::RejectedLocked => "rejected_locked",
+        CommandSubmission::RejectedOverrideUnlocked => "rejected_override_unlocked",
     };
 
     response_body(command, result, snapshot)
+}
+
+fn override_submission_response(
+    command: &'static str,
+    submission: CommandSubmission,
+    snapshot: DeskControllerSnapshot,
+    override_unlocked: bool,
+    side: Option<DeskLegSide>,
+    direction: Option<OverrideLegDirection>,
+) -> String {
+    let result = match submission {
+        CommandSubmission::Accepted => "accepted",
+        CommandSubmission::RejectedBusy => "rejected_busy",
+        CommandSubmission::RejectedUnhomed => "rejected_unhomed",
+        CommandSubmission::RejectedFaulted => "rejected_faulted",
+        CommandSubmission::RejectedLocked => "rejected_locked",
+        CommandSubmission::RejectedOverrideUnlocked => "rejected_override_unlocked",
+    };
+
+    let mut body = override_response_body(command, result, snapshot, override_unlocked);
+    if let Some(side) = side {
+        body.push_str("leg=");
+        body.push_str(leg_side_name(side));
+        body.push('\n');
+    }
+    if let Some(direction) = direction {
+        body.push_str("direction=");
+        body.push_str(override_direction_name(direction));
+        body.push('\n');
+    }
+    body
 }
 
 fn response_body(
@@ -662,6 +782,24 @@ fn response_body(
         bool_name(snapshot.command_pending),
         bool_name(snapshot.stop_requested),
         fault_name(snapshot.last_fault),
+    )
+}
+
+fn override_response_body(
+    command: &'static str,
+    result: &'static str,
+    snapshot: DeskControllerSnapshot,
+    override_unlocked: bool,
+) -> String {
+    format!(
+        "command={}\nresult={}\nmode={}\ncommand_pending={}\nstop_requested={}\nlast_fault={}\noverride_unlocked={}\n",
+        command,
+        result,
+        controller_mode_name(snapshot.mode),
+        bool_name(snapshot.command_pending),
+        bool_name(snapshot.stop_requested),
+        fault_name(snapshot.last_fault),
+        bool_name(override_unlocked),
     )
 }
 
@@ -709,6 +847,7 @@ desk.medium_obstruction_min_percent={}\n\
 desk.medium_obstruction_windows={}\n\
 desk.high_obstruction_min_percent={}\n\
 desk.high_obstruction_windows={}\n\
+desk.override_unlock_timeout_ms={}\n\
 leg.startup_duty={}\n\
 leg.max_duty={}\n\
 leg.run_duty={}\n\
@@ -752,6 +891,7 @@ leg.target_tolerance={}\n",
         medium_profile.consecutive_windows(),
         high_profile.minimum_baseline_percent().get(),
         high_profile.consecutive_windows(),
+        desk.override_unlock_timeout().as_millis(),
         leg.startup_duty().get(),
         leg.max_duty().get(),
         leg.run_duty().get(),
@@ -1014,6 +1154,10 @@ fn handle_config_set(
             payload,
             false,
         ),
+        "desk/override_unlock_timeout_ms" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_override_unlock_timeout(parse_duration_ms(payload)?)
+                .map_err(config_error_name)
+        }),
         "leg/startup_duty" => apply_leg_update(runtime_config_state, |leg| {
             leg.set_startup_duty(parse_duty_percent(payload)?)
                 .map_err(config_error_name)
@@ -1153,6 +1297,13 @@ fn parse_count_delta(value: &str) -> Result<CountDelta, &'static str> {
     }
 }
 
+fn parse_override_steps(value: &str) -> Result<CountDelta, &'static str> {
+    match u16::from_str(value) {
+        Ok(0) | Err(_) => Err("invalid_payload"),
+        Ok(value) => Ok(CountDelta::new(value)),
+    }
+}
+
 fn parse_duty_percent(value: &str) -> Result<DutyPercent, &'static str> {
     match u8::from_str(value) {
         Ok(value) if value <= DutyPercent::MAX => Ok(DutyPercent::new(value)),
@@ -1208,6 +1359,7 @@ fn controller_mode_name(mode: DeskControllerMode) -> &'static str {
         DeskControllerMode::Ready => "ready",
         DeskControllerMode::Homing => "homing",
         DeskControllerMode::Moving => "moving",
+        DeskControllerMode::Override => "override",
         DeskControllerMode::Faulted => "faulted",
     }
 }
@@ -1264,6 +1416,20 @@ fn obstruction_sensitivity_name(sensitivity: ObstructionSensitivity) -> &'static
     }
 }
 
+fn leg_side_name(side: DeskLegSide) -> &'static str {
+    match side {
+        DeskLegSide::Left => "left",
+        DeskLegSide::Right => "right",
+    }
+}
+
+fn override_direction_name(direction: OverrideLegDirection) -> &'static str {
+    match direction {
+        OverrideLegDirection::Up => "up",
+        OverrideLegDirection::Down => "down",
+    }
+}
+
 fn bool_name(value: bool) -> &'static str {
     if value { "true" } else { "false" }
 }
@@ -1314,6 +1480,7 @@ impl MqttSettings {
             topic_down: format!("{topic_prefix}/{}", CommandTopic::Down.suffix()),
             topic_move_to: format!("{topic_prefix}/{}", CommandTopic::MoveTo.suffix()),
             topic_move_by: format!("{topic_prefix}/{}", CommandTopic::MoveBy.suffix()),
+            topic_override_all: format!("{topic_prefix}/cmd/override/#"),
         })
     }
 
@@ -1385,6 +1552,10 @@ impl MqttSettings {
         topic_filter(&self.topic_config_set_all)
     }
 
+    fn override_topic_filter(&self) -> Result<TopicFilter<'_>, MqttError<'static>> {
+        topic_filter(&self.topic_override_all)
+    }
+
     fn parse_incoming_topic<'a>(&'a self, topic: &'a str) -> Option<IncomingTopic<'a>> {
         let command = match topic {
             topic if topic == self.topic_home => Some(CommandTopic::Home),
@@ -1408,9 +1579,39 @@ impl MqttSettings {
             return Some(IncomingTopic::ConfigReset);
         }
 
+        if let Some(path) = topic.strip_prefix(self.topic_override_all.strip_suffix('#')?) {
+            return parse_override_topic(path).map(IncomingTopic::Override);
+        }
+
         topic
             .strip_prefix(self.topic_config_set_all.strip_suffix('#')?)
             .map(IncomingTopic::ConfigSet)
+    }
+}
+
+fn parse_override_topic(path: &str) -> Option<OverrideTopic> {
+    match path {
+        "unlock" => Some(OverrideTopic::Unlock),
+        "lock" => Some(OverrideTopic::Lock),
+        "leg/left/home" => Some(OverrideTopic::LegHome(DeskLegSide::Left)),
+        "leg/right/home" => Some(OverrideTopic::LegHome(DeskLegSide::Right)),
+        "leg/left/up" => Some(OverrideTopic::LegMove(
+            DeskLegSide::Left,
+            OverrideLegDirection::Up,
+        )),
+        "leg/left/down" => Some(OverrideTopic::LegMove(
+            DeskLegSide::Left,
+            OverrideLegDirection::Down,
+        )),
+        "leg/right/up" => Some(OverrideTopic::LegMove(
+            DeskLegSide::Right,
+            OverrideLegDirection::Up,
+        )),
+        "leg/right/down" => Some(OverrideTopic::LegMove(
+            DeskLegSide::Right,
+            OverrideLegDirection::Down,
+        )),
+        _ => None,
     }
 }
 

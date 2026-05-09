@@ -44,7 +44,8 @@ const DESK_CONFIG_LEN: usize = COUNT_DELTA_LEN * 10
     + DUTY_TRIM_LEN * 2
     + DURATION_MS_LEN * 6
     + OBSTRUCTION_SENSITIVITY_LEN
-    + OBSTRUCTION_PROFILE_LEN * 3;
+    + OBSTRUCTION_PROFILE_LEN * 3
+    + DURATION_MS_LEN;
 const LEG_CONFIG_LEN: usize =
     DUTY_PERCENT_LEN * 5 + COUNT_DELTA_LEN * 4 + DURATION_MS_LEN * 4 + I32_LEN;
 const CONFIG_BLOB_LEN: usize = CONFIG_HEADER_LEN + DESK_CONFIG_LEN + LEG_CONFIG_LEN;
@@ -147,6 +148,7 @@ pub fn encode_runtime_config(config: RuntimeConfig) -> Vec<u8> {
     push_profile(&mut out, desk, ObstructionSensitivity::Low);
     push_profile(&mut out, desk, ObstructionSensitivity::Medium);
     push_profile(&mut out, desk, ObstructionSensitivity::High);
+    push_duration(&mut out, desk.override_unlock_timeout());
 
     let leg = config.leg();
     push_duty(&mut out, leg.startup_duty());
@@ -231,6 +233,8 @@ pub fn decode_runtime_config(bytes: &[u8]) -> Result<RuntimeConfig, PersistError
     desk.set_medium_obstruction_profile(reader.read_profile()?)
         .map_err(config_error)?;
     desk.set_high_obstruction_profile(reader.read_profile()?)
+        .map_err(config_error)?;
+    desk.set_override_unlock_timeout(reader.read_duration()?)
         .map_err(config_error)?;
 
     let mut leg = LegRuntimeConfig::new();
