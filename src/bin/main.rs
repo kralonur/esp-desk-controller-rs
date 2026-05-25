@@ -12,6 +12,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_hal::{
     clock::CpuClock,
+    interrupt::software::SoftwareInterruptControl,
     mcpwm::{McPwm, PeripheralClockConfig, PwmPeripheral},
     pcnt::Pcnt,
     rng::Rng,
@@ -442,23 +443,19 @@ async fn main(spawner: Spawner) -> ! {
     let leg_2_hall2_pin = peripherals.GPIO8;
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    esp_rtos::start(timg0.timer0);
+    let software_interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
 
-    static RADIO_INIT: StaticCell<esp_radio::Controller<'static>> = StaticCell::new();
-    let radio_init = RADIO_INIT
-        .uninit()
-        .write(esp_radio::init().expect("Failed to initialize Wi-Fi controller"));
     let rng = Rng::new();
-    let stack =
-        match esp_pwm_motor::wifi::start_wifi(radio_init, peripherals.WIFI, rng, &spawner).await {
-            Ok(stack) => stack,
-            Err(error) => {
-                warn!("wifi setup failed: {:?}", error);
-                loop {
-                    Timer::after(Duration::from_secs(1)).await;
-                }
+    let stack = match esp_pwm_motor::wifi::start_wifi(peripherals.WIFI, rng, &spawner).await {
+        Ok(stack) => stack,
+        Err(error) => {
+            warn!("wifi setup failed: {:?}", error);
+            loop {
+                Timer::after(Duration::from_secs(1)).await;
             }
-        };
+        }
+    };
     info!("main continuing after wifi setup");
 
     let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40)).unwrap();

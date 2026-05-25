@@ -1688,11 +1688,14 @@ pub fn spawn_mqtt(
     runtime_config_persistence: Option<&'static mut RuntimeConfigPersistence>,
     status_watcher: DeskStatusWatcher,
 ) {
-    spawner.must_spawn(mqtt_task(
-        stack,
-        state,
-        runtime_config_state,
-        runtime_config_persistence,
-        status_watcher,
-    ));
+    spawner.spawn(
+        mqtt_task(
+            stack,
+            state,
+            runtime_config_state,
+            runtime_config_persistence,
+            status_watcher,
+        )
+        .expect("spawn mqtt task"),
+    );
 }

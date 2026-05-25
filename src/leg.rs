@@ -554,10 +554,10 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
                 QuadratureDirection::Negative => PositionSign::Negative,
             },
         ));
-        spawner.must_spawn(mirror_quadrature_to_leg_status(
-            status_quadrature_watcher,
-            status_state,
-        ));
+        spawner.spawn(
+            mirror_quadrature_to_leg_status(status_quadrature_watcher, status_state)
+                .expect("spawn quadrature status mirror task"),
+        );
         let leg = Self {
             config,
             runtime_config_reader,

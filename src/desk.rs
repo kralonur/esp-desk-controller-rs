@@ -910,16 +910,14 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             right_max_position: 0,
         };
         let status_state = storage.state.init(DeskStatusState::new(initial_status));
-        spawner.must_spawn(mirror_leg_to_desk_status(
-            DeskSide::Left,
-            left_status_watcher,
-            status_state,
-        ));
-        spawner.must_spawn(mirror_leg_to_desk_status(
-            DeskSide::Right,
-            right_status_watcher,
-            status_state,
-        ));
+        spawner.spawn(
+            mirror_leg_to_desk_status(DeskSide::Left, left_status_watcher, status_state)
+                .expect("spawn left leg status mirror task"),
+        );
+        spawner.spawn(
+            mirror_leg_to_desk_status(DeskSide::Right, right_status_watcher, status_state)
+                .expect("spawn right leg status mirror task"),
+        );
 
         let desk = Self {
             left: Some(ManagedLeg::Unhomed(left)),

@@ -192,9 +192,10 @@ impl Quadrature<0> {
     }
 
     pub fn spawn(self, spawner: &Spawner) {
-        spawner.must_spawn(monitor_pcnt_unit0(
-            self.hall1, self.hall2, self.unit, self.state,
-        ));
+        spawner.spawn(
+            monitor_pcnt_unit0(self.hall1, self.hall2, self.unit, self.state)
+                .expect("spawn pcnt unit0 monitor task"),
+        );
     }
 }
 
@@ -215,9 +216,10 @@ impl Quadrature<1> {
     }
 
     pub fn spawn(self, spawner: &Spawner) {
-        spawner.must_spawn(monitor_pcnt_unit1(
-            self.hall1, self.hall2, self.unit, self.state,
-        ));
+        spawner.spawn(
+            monitor_pcnt_unit1(self.hall1, self.hall2, self.unit, self.state)
+                .expect("spawn pcnt unit1 monitor task"),
+        );
     }
 }
 
