@@ -32,159 +32,143 @@ pub enum DriveMode {
     HomeDown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DriveOutput {
+    side: Option<DriveSide>,
+    duty: DutyPercent,
+    timestamp: u16,
+    motion: MotionState,
+}
+
+impl DriveOutput {
+    pub(super) const fn stopped() -> Self {
+        Self {
+            side: None,
+            duty: DutyPercent::new(0),
+            timestamp: 0,
+            motion: MotionState::Idle,
+        }
+    }
+}
+
 impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
     pub fn apply_drive_mode(&mut self, mode: DriveMode, runtime_config: LegRuntimeConfig) {
-        let duty = match mode {
-            DriveMode::Stop => {
-                self.coast();
-                DutyPercent::new(0)
+        match mode {
+            DriveMode::Stop => self.apply_drive_output(DriveOutput::stopped()),
+            DriveMode::UpBoost => {
+                self.apply_up_drive_output(runtime_config.startup_duty(), runtime_config)
             }
-            DriveMode::UpBoost => self.drive_up_boost(runtime_config),
-            DriveMode::UpRun => self.drive_up_run(runtime_config),
-            DriveMode::UpSlow => self.drive_up_slow(runtime_config),
-            DriveMode::DownBoost => self.drive_down_boost(runtime_config),
-            DriveMode::DownRun => self.drive_down_run(runtime_config),
-            DriveMode::DownSlow => self.drive_down_slow(runtime_config),
-            DriveMode::HomeDown => self.drive_home_down(runtime_config),
-        };
-
-        let motion = match mode {
-            DriveMode::Stop => MotionState::Idle,
-            DriveMode::UpBoost | DriveMode::UpRun | DriveMode::UpSlow => MotionState::MovingUp,
-            DriveMode::DownBoost
-            | DriveMode::DownRun
-            | DriveMode::DownSlow
-            | DriveMode::HomeDown => MotionState::MovingDown,
-        };
-
-        self.send_status(LegStatus {
-            duty: duty.get(),
-            motion,
-            ..self.current_status()
-        });
+            DriveMode::UpRun => {
+                self.apply_up_drive_output(runtime_config.run_duty(), runtime_config)
+            }
+            DriveMode::UpSlow => {
+                self.apply_up_drive_output(runtime_config.slow_duty(), runtime_config)
+            }
+            DriveMode::DownBoost => {
+                self.apply_down_drive_output(runtime_config.startup_duty(), runtime_config)
+            }
+            DriveMode::DownRun => {
+                self.apply_down_drive_output(runtime_config.run_duty(), runtime_config)
+            }
+            DriveMode::DownSlow => {
+                self.apply_down_drive_output(runtime_config.slow_duty(), runtime_config)
+            }
+            DriveMode::HomeDown => {
+                self.apply_down_drive_output(runtime_config.homing_duty(), runtime_config)
+            }
+        }
     }
 
     pub fn drive_up_duty(&mut self, duty: DutyPercent, runtime_config: LegRuntimeConfig) {
-        let duty = if self.current_status().motion != MotionState::MovingUp {
+        let duty = if self
+            .drive_output
+            .is_none_or(|output| output.motion != MotionState::MovingUp)
+        {
             runtime_config.startup_duty()
         } else {
             duty
         };
-        let duty = self.drive_side(self.config.up_drive, duty, runtime_config);
-        self.send_status(LegStatus {
-            duty: duty.get(),
-            motion: MotionState::MovingUp,
-            ..self.current_status()
-        });
+        self.apply_up_drive_output(duty, runtime_config);
     }
 
     pub fn drive_down_duty(&mut self, duty: DutyPercent, runtime_config: LegRuntimeConfig) {
-        let duty = if self.current_status().motion != MotionState::MovingDown {
+        let duty = if self
+            .drive_output
+            .is_none_or(|output| output.motion != MotionState::MovingDown)
+        {
             runtime_config.startup_duty()
         } else {
             duty
         };
-        let duty = self.drive_side(
-            opposite_drive_side(self.config.up_drive),
-            duty,
-            runtime_config,
-        );
-        self.send_status(LegStatus {
-            duty: duty.get(),
-            motion: MotionState::MovingDown,
-            ..self.current_status()
-        });
+        self.apply_down_drive_output(duty, runtime_config);
     }
 
     pub fn drive_home_down_duty(&mut self, duty: DutyPercent, runtime_config: LegRuntimeConfig) {
-        let duty = if self.current_status().motion != MotionState::MovingDown {
+        let duty = if self
+            .drive_output
+            .is_none_or(|output| output.motion != MotionState::MovingDown)
+        {
             runtime_config.startup_duty()
         } else {
             duty
         };
-        let duty = self.drive_side(
-            opposite_drive_side(self.config.up_drive),
+        self.apply_down_drive_output(duty, runtime_config);
+    }
+
+    fn apply_up_drive_output(&mut self, duty: DutyPercent, runtime_config: LegRuntimeConfig) {
+        self.apply_directional_drive_output(
+            self.config.up_drive,
             duty,
+            MotionState::MovingUp,
             runtime_config,
         );
-        self.send_status(LegStatus {
-            duty: duty.get(),
-            motion: MotionState::MovingDown,
-            ..self.current_status()
-        });
     }
 
-    pub(super) fn drive_up_boost(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
-        self.drive_side(
-            self.config.up_drive,
-            runtime_config.startup_duty(),
-            runtime_config,
-        )
-    }
-
-    pub(super) fn drive_down_boost(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
-        self.drive_side(
+    fn apply_down_drive_output(&mut self, duty: DutyPercent, runtime_config: LegRuntimeConfig) {
+        self.apply_directional_drive_output(
             opposite_drive_side(self.config.up_drive),
-            runtime_config.startup_duty(),
+            duty,
+            MotionState::MovingDown,
             runtime_config,
-        )
+        );
     }
 
-    pub(super) fn drive_up_run(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
-        self.drive_side(
-            self.config.up_drive,
-            runtime_config.run_duty(),
-            runtime_config,
-        )
-    }
-
-    pub(super) fn drive_down_run(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
-        self.drive_side(
-            opposite_drive_side(self.config.up_drive),
-            runtime_config.run_duty(),
-            runtime_config,
-        )
-    }
-
-    pub(super) fn drive_up_slow(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
-        self.drive_side(
-            self.config.up_drive,
-            runtime_config.slow_duty(),
-            runtime_config,
-        )
-    }
-
-    pub(super) fn drive_down_slow(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
-        self.drive_side(
-            opposite_drive_side(self.config.up_drive),
-            runtime_config.slow_duty(),
-            runtime_config,
-        )
-    }
-
-    pub(super) fn drive_home_down(&mut self, runtime_config: LegRuntimeConfig) -> DutyPercent {
-        self.drive_side(
-            opposite_drive_side(self.config.up_drive),
-            runtime_config.homing_duty(),
-            runtime_config,
-        )
-    }
-
-    pub(super) fn drive_side(
+    fn apply_directional_drive_output(
         &mut self,
         side: DriveSide,
         duty: DutyPercent,
+        motion: MotionState,
         runtime_config: LegRuntimeConfig,
-    ) -> DutyPercent {
+    ) {
         let duty = duty
             .min(runtime_config.max_duty())
             .min(DutyPercent::new(100));
-        let timestamp = duty.to_pwm_timestamp(PWM_TIMER_MAX_TICKS);
-        match side {
-            DriveSide::Left => self.motor.drive_left(timestamp),
-            DriveSide::Right => self.motor.drive_right(timestamp),
+        let output = DriveOutput {
+            side: Some(side),
+            duty,
+            timestamp: duty.to_pwm_timestamp(PWM_TIMER_MAX_TICKS),
+            motion,
+        };
+        self.apply_drive_output(output);
+    }
+
+    fn apply_drive_output(&mut self, output: DriveOutput) {
+        if self.drive_output == Some(output) {
+            return;
         }
-        duty
+
+        match output.side {
+            Some(DriveSide::Left) => self.motor.drive_left(output.timestamp),
+            Some(DriveSide::Right) => self.motor.drive_right(output.timestamp),
+            None => self.motor.coast(),
+        }
+
+        self.drive_output = Some(output);
+        self.send_status(LegStatus {
+            duty: output.duty.get(),
+            motion: output.motion,
+            ..self.current_status()
+        });
     }
 }
 

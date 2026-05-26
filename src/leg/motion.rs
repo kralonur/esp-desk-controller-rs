@@ -10,7 +10,7 @@ use crate::{
 use super::{
     drive::{DriveMode, progressed_in_direction, travel_in_direction},
     state::{Leg, Ready, Unhomed},
-    status::{LegStatus, MotionState},
+    status::MotionState,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
@@ -180,12 +180,8 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             return;
         }
 
-        let duty = self.drive_up_run(runtime_config);
         self.state.motion = MotionState::MovingUp;
-        self.send_status(LegStatus {
-            duty: duty.get(),
-            ..self.status()
-        });
+        self.apply_drive_mode(DriveMode::UpRun, runtime_config);
     }
 
     pub fn move_down(&mut self) {
@@ -195,21 +191,13 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             return;
         }
 
-        let duty = self.drive_down_run(runtime_config);
         self.state.motion = MotionState::MovingDown;
-        self.send_status(LegStatus {
-            duty: duty.get(),
-            ..self.status()
-        });
+        self.apply_drive_mode(DriveMode::DownRun, runtime_config);
     }
 
     pub fn stop(&mut self) {
-        self.coast();
         self.state.motion = MotionState::Idle;
-        self.send_status(LegStatus {
-            duty: 0,
-            ..self.status()
-        });
+        self.apply_drive_mode(DriveMode::Stop, self.runtime_config_reader.current().leg());
     }
 
     async fn wait_for_progress(
@@ -277,19 +265,11 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         }
 
         if direction == self.state.up_direction {
-            let duty = self.drive_up_run(runtime_config);
             self.state.motion = MotionState::MovingUp;
-            self.send_status(LegStatus {
-                duty: duty.get(),
-                ..self.status()
-            });
+            self.apply_drive_mode(DriveMode::UpRun, runtime_config);
         } else if direction == self.state.down_direction {
-            let duty = self.drive_down_run(runtime_config);
             self.state.motion = MotionState::MovingDown;
-            self.send_status(LegStatus {
-                duty: duty.get(),
-                ..self.status()
-            });
+            self.apply_drive_mode(DriveMode::DownRun, runtime_config);
         }
 
         while travel_in_direction(start_position, self.encoder_position(), direction) < steps as i32
@@ -346,12 +326,8 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                 if error <= runtime_config.target_slow_zone().get_i32() {
                     self.start_up_slow(runtime_config);
                 } else {
-                    let duty = self.drive_up_run(runtime_config);
                     self.state.motion = MotionState::MovingUp;
-                    self.send_status(LegStatus {
-                        duty: duty.get(),
-                        ..self.status()
-                    });
+                    self.apply_drive_mode(DriveMode::UpRun, runtime_config);
                 }
             }
         } else if target_position < current_position {
@@ -375,12 +351,8 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                 if error <= runtime_config.target_slow_zone().get_i32() {
                     self.start_down_slow(runtime_config);
                 } else {
-                    let duty = self.drive_down_run(runtime_config);
                     self.state.motion = MotionState::MovingDown;
-                    self.send_status(LegStatus {
-                        duty: duty.get(),
-                        ..self.status()
-                    });
+                    self.apply_drive_mode(DriveMode::DownRun, runtime_config);
                 }
             }
         } else {

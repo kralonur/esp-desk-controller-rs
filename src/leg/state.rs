@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::{
-    drive::{DriveSide, opposite_direction},
+    drive::{DriveOutput, DriveSide, opposite_direction},
     status::{
         LegProgressWatcher, LegStatus, LegStatusState, LegStatusStorage, LegStatusWatcher,
         MotionState, mirror_quadrature_to_leg_status,
@@ -49,6 +49,7 @@ pub struct Leg<'a, State, const OP: u8, PWM: PwmPeripheral> {
     pub(super) motor: Motor<'a, OP, PWM>,
     pub(super) quadrature_watcher: QuadratureWatcher,
     pub(super) status_state: &'static LegStatusState,
+    pub(super) drive_output: Option<DriveOutput>,
     pub(super) state: State,
 }
 
@@ -100,6 +101,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
 
     pub(super) fn coast(&mut self) {
         self.motor.coast();
+        self.drive_output = None;
     }
 
     pub(super) fn send_status(&self, status: LegStatus) {
@@ -179,6 +181,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
             motor,
             quadrature_watcher,
             status_state,
+            drive_output: Some(DriveOutput::stopped()),
             state: Unhomed,
         };
         leg.send_status(leg.status());
@@ -202,6 +205,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
             motor: self.motor,
             quadrature_watcher: self.quadrature_watcher,
             status_state: self.status_state,
+            drive_output: self.drive_output,
             state: Ready {
                 min_position: 0,
                 max_position: runtime_config.default_max_position().get(),
@@ -237,6 +241,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
 
     pub fn into_unhomed(mut self) -> Leg<'a, Unhomed, OP, PWM> {
         self.coast();
+        self.drive_output = Some(DriveOutput::stopped());
         self.send_status(LegStatus {
             position: self.logical_position(),
             min_position: 0,
@@ -252,6 +257,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             motor: self.motor,
             quadrature_watcher: self.quadrature_watcher,
             status_state: self.status_state,
+            drive_output: self.drive_output,
             state: Unhomed,
         }
     }
