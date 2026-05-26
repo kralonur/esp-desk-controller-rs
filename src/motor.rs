@@ -1,3 +1,8 @@
+//! Low-level MCPWM motor output wrapper.
+//!
+//! `Motor` owns one pair of enable pins and PWM outputs and exposes directional
+//! drive commands used by the leg control layer.
+
 use esp_hal::{
     gpio::{Level, Output, OutputConfig, OutputPin, interconnect::PeripheralOutput},
     mcpwm::{

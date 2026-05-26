@@ -4,8 +4,13 @@
 //! in `main`: persistent config loading, WiFi, motor/PWM/quadrature setup, desk
 //! construction, controller state, MQTT, and finally the desk control loop.
 //!
-//! `control` owns the desk command execution loop. Keeping it separate lets the
-//! startup path stay focused on hardware and task wiring.
+//! File layout:
+//!
+//! - `mod`: startup wiring, storage allocation, peripheral assignment, task
+//!   spawning, and handoff into the desk control loop.
+//! - `control`: desk command execution. It consumes controller commands, drives
+//!   desk typestate operations, records lifecycle transitions, and logs
+//!   completion/stop/fault outcomes.
 
 use defmt::{info, warn};
 use embassy_executor::Spawner;

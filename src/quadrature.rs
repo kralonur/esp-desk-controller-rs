@@ -1,3 +1,9 @@
+//! PCNT-backed quadrature encoder driver.
+//!
+//! This module configures ESP PCNT units for hall sensor inputs, maintains a
+//! software position accumulator across interrupts, and publishes position
+//! events through watchers for leg status and movement logic.
+
 use core::sync::atomic::{AtomicI32, AtomicU8, AtomicU32, Ordering};
 
 use embassy_executor::Spawner;

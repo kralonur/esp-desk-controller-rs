@@ -1,14 +1,14 @@
 //! Desk command coordination and externally visible controller state.
 //!
-//! `command` defines the command and submission result types used by MQTT and
-//! the desk control task.
+//! File layout:
 //!
-//! `status` owns the controller mode, snapshot, and fault representation. This
-//! is the read-only status surface that MQTT publishes.
-//!
-//! `state` owns the mutable controller state: the command queue, stop request,
-//! override unlock timeout, submission policy, and lifecycle transitions driven
-//! by the desk control task.
+//! - `command`: command and submission result types used by MQTT and the desk
+//!   control task.
+//! - `status`: controller mode, snapshot, and fault representation. This is the
+//!   read-only status surface that MQTT publishes.
+//! - `state`: mutable controller state: the command queue, stop request,
+//!   override unlock timeout, submission policy, and lifecycle transitions
+//!   driven by the desk control task.
 
 mod command;
 mod state;

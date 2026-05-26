@@ -1,3 +1,8 @@
+//! Minimal firmware entrypoint.
+//!
+//! This binary owns the earliest boot setup: HAL configuration, peripheral
+//! acquisition, heap initialization, and delegation to `esp_pwm_motor::app`.
+
 #![no_std]
 #![no_main]
 #![deny(

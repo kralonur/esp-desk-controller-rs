@@ -1,3 +1,9 @@
+//! WiFi startup and connection supervision.
+//!
+//! This module reads compile-time WiFi credentials, starts the ESP radio stack,
+//! spawns background network tasks, and returns an Embassy network stack once
+//! DHCP has completed.
+
 use alloc::string::String;
 
 use defmt::{info, warn};

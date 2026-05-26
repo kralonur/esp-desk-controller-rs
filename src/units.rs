@@ -1,3 +1,8 @@
+//! Small typed wrappers for firmware units.
+//!
+//! These types keep raw encoder counts, relative movement counts, duty percent,
+//! trim percent, and generic percent values from being mixed accidentally.
+
 use defmt::Format;
 
 pub const PWM_TIMER_MAX_TICKS: u16 = 99;
