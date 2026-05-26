@@ -1,6 +1,5 @@
 use core::cell::Cell;
 
-use defmt::Format;
 use embassy_sync::{
     blocking_mutex::{Mutex, raw::CriticalSectionRawMutex},
     channel::Channel,
@@ -8,74 +7,12 @@ use embassy_sync::{
 use embassy_time::{Duration, Instant};
 
 use crate::config::{ObstructionSensitivity, RuntimeConfigReader};
-use crate::desk::{
-    DeskError, DeskLegSide, DeskMoveInvariant, DeskStatus, DeskStatusReader, OverrideLegDirection,
+use crate::controller::{
+    command::{CommandSubmission, DeskCommand, OverrideCommand, StopSubmission},
+    status::{DeskControllerMode, DeskControllerSnapshot, DeskFault},
 };
+use crate::desk::{DeskError, DeskLegSide, DeskStatus, DeskStatusReader, OverrideLegDirection};
 use crate::units::{CountDelta, PositionCounts, RelativeCounts};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
-pub enum DeskCommand {
-    Home,
-    MoveTo(PositionCounts),
-    MoveBy(RelativeCounts),
-    Override(OverrideCommand),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
-pub enum OverrideCommand {
-    Home {
-        side: DeskLegSide,
-    },
-    Move {
-        side: DeskLegSide,
-        direction: OverrideLegDirection,
-        steps: CountDelta,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
-pub enum DeskControllerMode {
-    Unhomed,
-    Ready,
-    Homing,
-    Moving,
-    Override,
-    Faulted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
-pub enum DeskFault {
-    LeftLeg(crate::leg::LegError),
-    RightLeg(crate::leg::LegError),
-    MoveTimeout,
-    SkewFault,
-    InvariantViolation(DeskMoveInvariant),
-    RehomeRequired,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DeskControllerSnapshot {
-    pub mode: DeskControllerMode,
-    pub command_pending: bool,
-    pub stop_requested: bool,
-    pub last_fault: Option<DeskFault>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandSubmission {
-    Accepted,
-    RejectedBusy,
-    RejectedUnhomed,
-    RejectedFaulted,
-    RejectedLocked,
-    RejectedOverrideUnlocked,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StopSubmission {
-    Accepted,
-    IgnoredIdle,
-}
 
 pub struct DeskControllerState {
     commands: Channel<CriticalSectionRawMutex, DeskCommand, 1>,
@@ -364,19 +301,5 @@ impl DeskControllerState {
             snapshot.set(current);
             current
         })
-    }
-}
-
-impl DeskFault {
-    fn from_desk_error(error: DeskError) -> Option<Self> {
-        match error {
-            DeskError::LeftLeg(error) => Some(Self::LeftLeg(error)),
-            DeskError::RightLeg(error) => Some(Self::RightLeg(error)),
-            DeskError::MoveTimeout => Some(Self::MoveTimeout),
-            DeskError::SkewFault => Some(Self::SkewFault),
-            DeskError::InvariantViolation(invariant) => Some(Self::InvariantViolation(invariant)),
-            DeskError::RehomeRequired => Some(Self::RehomeRequired),
-            DeskError::Stopped => None,
-        }
     }
 }
