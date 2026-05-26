@@ -9,6 +9,7 @@ use crate::{
 
 use super::{
     movement::DeskMoveInvariant,
+    position::{abs_position_delta, average_position},
     status::{
         DeskMotionState, DeskSide, DeskStatus, DeskStatusReader, DeskStatusState,
         DeskStatusStorage, DeskStatusWatcher, DeskStopReason,
@@ -236,8 +237,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             right_position,
             left_duty: 0,
             right_duty: 0,
-            average_position: (left_position + right_position) / 2,
-            skew_counts: (left_position - right_position).abs(),
+            average_position: average_position(left_position, right_position),
+            skew_counts: abs_position_delta(left_position, right_position),
             min_position: 0,
             max_position: 0,
             left_min_position: 0,

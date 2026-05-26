@@ -8,6 +8,7 @@ use crate::{
 
 use super::{
     monitor::{AxisTargetState, MoveSnapshot},
+    position::position_delta,
     status::DeskMotionState,
 };
 
@@ -65,8 +66,8 @@ impl TravelDirection {
 
     pub(super) fn travel(self, start_position: i32, current_position: i32) -> i32 {
         match self {
-            Self::Up => (current_position - start_position).max(0),
-            Self::Down => (start_position - current_position).max(0),
+            Self::Up => position_delta(current_position, start_position).max(0),
+            Self::Down => position_delta(start_position, current_position).max(0),
         }
     }
 }

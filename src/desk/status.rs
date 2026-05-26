@@ -10,6 +10,8 @@ use static_cell::StaticCell;
 
 use crate::leg::LegStatus;
 
+use super::position::{abs_position_delta, average_position};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub enum DeskMotionState {
     Idle,
@@ -131,9 +133,9 @@ impl DeskStatusState {
             let previous = *cached_status;
             update_fn(&mut cached_status);
             cached_status.average_position =
-                (cached_status.left_position + cached_status.right_position) / 2;
+                average_position(cached_status.left_position, cached_status.right_position);
             cached_status.skew_counts =
-                (cached_status.left_position - cached_status.right_position).abs();
+                abs_position_delta(cached_status.left_position, cached_status.right_position);
             cached_status.min_position = cached_status
                 .left_min_position
                 .max(cached_status.right_min_position);

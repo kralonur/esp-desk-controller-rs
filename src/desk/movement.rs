@@ -12,9 +12,10 @@ use crate::{
 use super::{
     monitor::{
         MoveProgressMonitor, MoveSnapshot, MoveStart, MoveStepValidation, ObstructionMonitor,
-        average_position, validate_move_start, validate_move_step,
+        validate_move_start, validate_move_step,
     },
     planning::{SyncPhase, TravelDirection, apply_dual_plan, next_sync_phase, plan_move},
+    position::average_position,
     state::{Desk, DeskError, ReadyDesk, UnhomedDesk},
     status::DeskStopReason,
 };

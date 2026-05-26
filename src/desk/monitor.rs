@@ -8,6 +8,7 @@ use crate::{
 use super::{
     movement::{DeskMoveInvariant, DeskMoveOutcome},
     planning::{SyncPhase, TravelDirection},
+    position::{abs_position_delta, average_position, position_delta},
     state::DeskError,
     status::DeskStatus,
 };
@@ -81,8 +82,8 @@ impl MoveProgressMonitor {
 
     pub(super) fn observe(&mut self, average_position: i32) -> Option<DeskMoveInvariant> {
         let forward_travel = match self.direction {
-            TravelDirection::Up => average_position - self.start_average_position,
-            TravelDirection::Down => self.start_average_position - average_position,
+            TravelDirection::Up => position_delta(average_position, self.start_average_position),
+            TravelDirection::Down => position_delta(self.start_average_position, average_position),
         }
         .max(0);
         self.max_forward_travel = self.max_forward_travel.max(forward_travel);
@@ -115,16 +116,16 @@ impl MoveSnapshot {
         right_position: i32,
     ) -> Self {
         let tolerance = config.target_tolerance().get_i32();
-        let left_error = target - left_position;
-        let right_error = target - right_position;
         let left_done = axis_done(direction, target, left_position, tolerance);
         let right_done = axis_done(direction, target, right_position, tolerance);
-        let left_near = left_error.abs() <= config.target_slow_zone().get_i32();
-        let right_near = right_error.abs() <= config.target_slow_zone().get_i32();
+        let left_near =
+            abs_position_delta(target, left_position) <= config.target_slow_zone().get_i32();
+        let right_near =
+            abs_position_delta(target, right_position) <= config.target_slow_zone().get_i32();
 
         Self {
-            observed_skew: left_position - right_position,
-            observed_skew_abs: (left_position - right_position).abs(),
+            observed_skew: position_delta(left_position, right_position),
+            observed_skew_abs: abs_position_delta(left_position, right_position),
             left: AxisTargetState {
                 done: left_done,
                 near_target: left_near,
@@ -151,10 +152,6 @@ impl MoveSnapshot {
     }
 }
 
-pub(super) fn average_position(left_position: i32, right_position: i32) -> i32 {
-    (left_position + right_position) / 2
-}
-
 pub(super) fn validate_move_start(
     status: DeskStatus,
     target_position: PositionCounts,
@@ -167,7 +164,7 @@ pub(super) fn validate_move_start(
         )
         .get();
 
-    if (target - status.average_position).abs() <= config.target_tolerance().get_i32() {
+    if abs_position_delta(target, status.average_position) <= config.target_tolerance().get_i32() {
         return Err(DeskMoveOutcome::Completed);
     }
 
@@ -246,7 +243,7 @@ impl ObstructionMonitor {
     ) -> bool {
         let left_travel = self.direction.travel(self.start_left, left_position);
         let right_travel = self.direction.travel(self.start_right, right_position);
-        let total_travel = left_travel + right_travel;
+        let total_travel = left_travel.saturating_add(right_travel);
 
         self.max_left_travel = self.max_left_travel.max(left_travel);
         self.max_right_travel = self.max_right_travel.max(right_travel);

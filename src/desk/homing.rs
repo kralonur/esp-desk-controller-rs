@@ -5,7 +5,7 @@ use crate::leg::{DriveMode, LegError};
 
 use super::{
     planning::{LegPlan, SyncPhase, apply_dual_plan, next_sync_phase, plan_homing_down},
-    position::{progressed_in_direction, travel_in_direction},
+    position::{abs_position_delta, position_delta, progressed_in_direction, travel_in_direction},
     state::{Desk, DeskError, ManagedLeg, ReadyDesk, UnhomedDesk},
     status::{DeskMotionState, DeskStopReason},
 };
@@ -66,13 +66,14 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
 
         let initial_left_position = left_leg.logical_encoder_position();
         let initial_right_position = right_leg.logical_encoder_position();
-        if initial_left_position > initial_right_position + alignment_tolerance {
+        if position_delta(initial_left_position, initial_right_position) > alignment_tolerance {
             right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
             left_leg.apply_drive_mode(DriveMode::HomeDown, leg_config);
             let mut last_position = left_leg.encoder_position();
             let mut last_progress = Instant::now();
 
-            while left_leg.logical_encoder_position() > initial_right_position + alignment_tolerance
+            while position_delta(left_leg.logical_encoder_position(), initial_right_position)
+                > alignment_tolerance
             {
                 if stop_requested() {
                     left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
@@ -112,13 +113,16 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
 
             left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
             right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
-        } else if initial_right_position > initial_left_position + alignment_tolerance {
+        } else if position_delta(initial_right_position, initial_left_position)
+            > alignment_tolerance
+        {
             left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
             right_leg.apply_drive_mode(DriveMode::HomeDown, leg_config);
             let mut last_position = right_leg.encoder_position();
             let mut last_progress = Instant::now();
 
-            while right_leg.logical_encoder_position() > initial_left_position + alignment_tolerance
+            while position_delta(right_leg.logical_encoder_position(), initial_left_position)
+                > alignment_tolerance
             {
                 if stop_requested() {
                     left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
@@ -276,8 +280,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 travel_in_direction(left_start, left_leg.encoder_position(), left_direction);
             let right_travel =
                 travel_in_direction(right_start, right_leg.encoder_position(), right_direction);
-            let observed_skew = left_travel - right_travel;
-            let homing_skew = observed_skew.abs();
+            let observed_skew = position_delta(left_travel, right_travel);
+            let homing_skew = abs_position_delta(left_travel, right_travel);
 
             if homing_skew > desk_config.homing_fault_skew_counts().get_i32() {
                 left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
@@ -310,8 +314,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         let mut right_backoff_progress_at = Instant::now();
         let mut left_backoff_done = false;
         let mut right_backoff_done = false;
-        let mut left_backoff = 0;
-        let mut right_backoff = 0;
+        let mut left_backoff: i32 = 0;
+        let mut right_backoff: i32 = 0;
         let mut left_boosting = true;
         let mut right_boosting = true;
 
@@ -333,7 +337,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                     travel_in_direction(left_backoff_position, current_position, left_up_direction);
                 if progress > 0 {
                     left_backoff_progress_at = Instant::now();
-                    left_backoff += progress;
+                    left_backoff = left_backoff.saturating_add(progress);
                     left_backoff_position = current_position;
                     if left_boosting {
                         left_leg.apply_drive_mode(DriveMode::UpRun, leg_config);
@@ -366,7 +370,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 );
                 if progress > 0 {
                     right_backoff_progress_at = Instant::now();
-                    right_backoff += progress;
+                    right_backoff = right_backoff.saturating_add(progress);
                     right_backoff_position = current_position;
                     if right_boosting {
                         right_leg.apply_drive_mode(DriveMode::UpRun, leg_config);
@@ -390,7 +394,9 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 }
             }
 
-            if (left_backoff - right_backoff).abs() > desk_config.fault_skew_counts().get_i32() {
+            if abs_position_delta(left_backoff, right_backoff)
+                > desk_config.fault_skew_counts().get_i32()
+            {
                 left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                 right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
                 return Err(self.restore_unhomed(left_leg, right_leg, DeskError::SkewFault));
