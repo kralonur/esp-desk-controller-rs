@@ -55,7 +55,7 @@ pub struct ObstructionProfileConfig {
 /// Runtime settings for coordinated desk behavior.
 ///
 /// Validation keeps the move timeout longer than the obstruction detection
-/// window and requires nonzero operator-facing timeouts/intervals.
+/// window and requires nonzero movement timeouts/intervals.
 pub struct DeskConfig {
     target_tolerance: CountDelta,
     target_slow_zone: CountDelta,
@@ -133,6 +133,11 @@ impl DeskConfig {
 
     const fn is_valid(self) -> bool {
         self.move_timeout.as_millis() > default_obstruction_detection_time_ms(self)
+            && self.obstruction_sample_window.as_millis() > 0
+            && self.obstruction_warmup_duration.as_millis() > 0
+            && self.homing_poll_interval.as_millis() > 0
+            && self.homing_start_timeout.as_millis() > 0
+            && self.homing_stall_timeout.as_millis() > 0
             && self.override_unlock_timeout.as_millis() > 0
             && self.mqtt_status_publish_interval.as_millis() > 0
     }

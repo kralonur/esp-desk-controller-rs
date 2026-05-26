@@ -21,7 +21,8 @@ const DEFAULT_LEG_TARGET_TOLERANCE: CountDelta = CountDelta::new(5);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Runtime settings for individual leg movement and homing.
 ///
-/// Validation currently guarantees the default maximum position is nonnegative.
+/// Validation keeps travel limits sane and rejects zero movement
+/// timeouts/intervals.
 pub struct LegRuntimeConfig {
     startup_duty: DutyPercent,
     max_duty: DutyPercent,
@@ -71,6 +72,10 @@ impl LegRuntimeConfig {
 
     const fn is_valid(self) -> bool {
         self.default_max_position.get() >= 0
+            && self.homing_start_timeout.as_millis() > 0
+            && self.homing_stall_timeout.as_millis() > 0
+            && self.homing_poll_interval.as_millis() > 0
+            && self.move_stall_timeout.as_millis() > 0
     }
 
     fn update_checked(&mut self, update_fn: impl FnOnce(&mut Self)) -> Result<(), ConfigError> {
