@@ -13,12 +13,14 @@ use super::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Physical motor side used for upward travel.
 pub enum DriveSide {
     Left,
     Right,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Requested low-level drive behavior for a leg motor.
 pub enum DriveMode {
     Stop,
     UpBoost,

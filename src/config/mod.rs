@@ -26,6 +26,7 @@ pub use leg::LegRuntimeConfig;
 pub use runtime::{RuntimeConfig, RuntimeConfigReader, RuntimeConfigState, RuntimeConfigStorage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Validation errors for runtime configuration updates.
 pub enum ConfigError {
     InvalidDeskConfig,
     InvalidLegConfig,

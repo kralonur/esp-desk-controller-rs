@@ -11,6 +11,7 @@ use static_cell::StaticCell;
 use crate::{quadrature::QuadratureWatcher, units::PositionSign};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Current motion intent reported for one leg.
 pub enum MotionState {
     Idle,
     MovingUp,
@@ -18,6 +19,7 @@ pub enum MotionState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Latest observer-facing state for one leg.
 pub struct LegStatus {
     pub position: i32,
     pub min_position: i32,
@@ -28,18 +30,22 @@ pub struct LegStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Lightweight progress event used by desk movement loops.
 pub struct LegProgress {
     pub position: i32,
 }
 
+/// Static storage used to initialize one leg status channel.
 pub struct LegStatusStorage {
     pub(super) state: StaticCell<LegStatusState>,
 }
 
+/// Async watcher for leg status changes.
 pub struct LegStatusWatcher {
     pub(super) receiver: Receiver<'static, CriticalSectionRawMutex, LegStatus, 4>,
 }
 
+/// Async watcher for logical encoder progress.
 pub struct LegProgressWatcher {
     pub(super) quadrature_watcher: QuadratureWatcher,
     pub(super) position_sign: PositionSign,

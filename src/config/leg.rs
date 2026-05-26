@@ -19,6 +19,9 @@ const DEFAULT_LEG_TARGET_SLOW_ZONE: CountDelta = CountDelta::new(10);
 const DEFAULT_LEG_TARGET_TOLERANCE: CountDelta = CountDelta::new(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Runtime settings for individual leg movement and homing.
+///
+/// Validation currently guarantees the default maximum position is nonnegative.
 pub struct LegRuntimeConfig {
     startup_duty: DutyPercent,
     max_duty: DutyPercent,

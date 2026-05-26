@@ -15,6 +15,7 @@ pub use codec::{decode_runtime_config, encode_runtime_config};
 pub use storage::RuntimeConfigPersistence;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+/// Errors from loading, decoding, encoding, or storing runtime config.
 pub enum PersistError {
     Storage,
     Missing,

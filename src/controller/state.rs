@@ -14,6 +14,10 @@ use crate::controller::{
 use crate::desk::{DeskError, DeskLegSide, DeskStatus, DeskStatusReader, OverrideLegDirection};
 use crate::units::{CountDelta, PositionCounts, RelativeCounts};
 
+/// Shared command queue and state machine for desk control.
+///
+/// MQTT submits commands here, while the app control loop consumes them and
+/// reports lifecycle transitions back through this state.
 pub struct DeskControllerState {
     commands: Channel<CriticalSectionRawMutex, DeskCommand, 1>,
     snapshot: Mutex<CriticalSectionRawMutex, Cell<DeskControllerSnapshot>>,
@@ -23,6 +27,7 @@ pub struct DeskControllerState {
 }
 
 impl DeskControllerState {
+    /// Create controller state from desk status and runtime config readers.
     pub fn new(
         status_reader: DeskStatusReader,
         runtime_config_reader: RuntimeConfigReader,
@@ -67,6 +72,7 @@ impl DeskControllerState {
         })
     }
 
+    /// Unlock manual override commands for the configured timeout.
     pub fn unlock_override(&self) -> Duration {
         let timeout = self
             .runtime_config_reader
@@ -82,6 +88,7 @@ impl DeskControllerState {
         self.override_unlocked_until.lock(|until| until.set(None));
     }
 
+    /// Queue a full desk home command if the controller is idle enough.
     pub fn submit_home(&self) -> CommandSubmission {
         let snapshot = self.snapshot();
         if snapshot.command_pending
@@ -106,18 +113,22 @@ impl DeskControllerState {
         }
     }
 
+    /// Queue an absolute target move for a ready desk.
     pub fn submit_move_to(&self, position: PositionCounts) -> CommandSubmission {
         self.submit_motion(DeskCommand::MoveTo(position))
     }
 
+    /// Queue a relative target move for a ready desk.
     pub fn submit_move_by(&self, delta: RelativeCounts) -> CommandSubmission {
         self.submit_motion(DeskCommand::MoveBy(delta))
     }
 
+    /// Queue a manual one-leg home override while override mode is unlocked.
     pub fn submit_override_home(&self, side: DeskLegSide) -> CommandSubmission {
         self.submit_override(OverrideCommand::Home { side })
     }
 
+    /// Queue a manual one-leg step override while override mode is unlocked.
     pub fn submit_override_move(
         &self,
         side: DeskLegSide,
@@ -131,6 +142,7 @@ impl DeskControllerState {
         })
     }
 
+    /// Request the active or pending command to stop.
     pub fn submit_stop(&self) -> StopSubmission {
         let snapshot = self.snapshot();
         if snapshot.command_pending
@@ -148,6 +160,7 @@ impl DeskControllerState {
         }
     }
 
+    /// Wait for the next queued command and clear the pending flag.
     pub async fn next_command(&self) -> DeskCommand {
         let command = self.commands.receive().await;
         self.update_snapshot(|snapshot| snapshot.command_pending = false);

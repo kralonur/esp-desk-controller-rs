@@ -16,14 +16,20 @@ use super::{
     },
 };
 
+/// Typestate marker for a leg that has not established its travel limits.
 pub struct Unhomed;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Static direction configuration for one physical leg.
+///
+/// `up_drive` selects which motor side raises the leg, while `up_direction`
+/// records which quadrature direction corresponds to upward travel.
 pub struct LegConfig {
     pub up_drive: DriveSide,
     pub up_direction: QuadratureDirection,
 }
 
+/// Typestate data for a homed leg with known travel limits.
 pub struct Ready {
     pub(super) min_position: i32,
     pub(super) max_position: i32,
@@ -33,6 +39,10 @@ pub struct Ready {
     pub(super) motion: MotionState,
 }
 
+/// One motorized desk leg.
+///
+/// The `State` typestate controls whether movement may use configured travel
+/// limits. Unhomed legs can home; ready legs can move to targets.
 pub struct Leg<'a, State, const OP: u8, PWM: PwmPeripheral> {
     pub(super) config: LegConfig,
     pub(super) runtime_config_reader: RuntimeConfigReader,
@@ -58,6 +68,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         }
     }
 
+    /// Current logical position after applying configured encoder polarity.
     pub fn logical_position(&self) -> i32 {
         self.current_status().position
     }
@@ -70,6 +81,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         self.position_sign().apply(self.encoder_position())
     }
 
+    /// Reset the underlying quadrature position accumulator to zero.
     pub fn reset_position(&self) {
         self.quadrature_watcher.reset_position();
     }
@@ -94,6 +106,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         self.status_state.publish(status);
     }
 
+    /// Subscribe to published leg status changes.
     pub fn status_watcher(&self) -> LegStatusWatcher {
         let receiver = self
             .status_state
@@ -104,6 +117,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         LegStatusWatcher { receiver }
     }
 
+    /// Subscribe to raw quadrature progress using the leg's logical direction.
     pub fn progress_watcher(&self) -> LegProgressWatcher {
         LegProgressWatcher {
             quadrature_watcher: self.quadrature_watcher.resubscribe(),
@@ -128,6 +142,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
         self.send_status(self.status());
     }
 
+    /// Build an unhomed leg and start mirroring quadrature events into status.
     pub fn new(
         storage: &'static LegStatusStorage,
         config: LegConfig,

@@ -51,6 +51,7 @@ static PCNT_UNIT0_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static PCNT_UNIT1_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Direction inferred from a quadrature state transition.
 pub enum QuadratureDirection {
     Positive,
     Negative,
@@ -58,6 +59,7 @@ pub enum QuadratureDirection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Current encoder state and accumulated position.
 pub struct QuadratureSnapshot {
     pub state: u8,
     pub position: i32,
@@ -65,6 +67,7 @@ pub struct QuadratureSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Published quadrature edge event.
 pub struct QuadratureEvent {
     pub channel: u8,
     pub level: Level,
@@ -86,10 +89,14 @@ struct QuadratureState {
     events: Watch<CriticalSectionRawMutex, QuadratureEvent, 4>,
 }
 
+/// Static storage used to initialize one quadrature channel.
 pub struct QuadratureStorage {
     state: StaticCell<QuadratureState>,
 }
 
+/// PCNT-backed quadrature channel for one hardware PCNT unit.
+///
+/// `UNIT` must match the ESP PCNT unit used during construction.
 pub struct Quadrature<const UNIT: usize> {
     hall1: Input<'static>,
     hall2: Input<'static>,
@@ -97,6 +104,7 @@ pub struct Quadrature<const UNIT: usize> {
     state: &'static QuadratureState,
 }
 
+/// Async watcher for quadrature events and position snapshots.
 pub struct QuadratureWatcher {
     receiver: Receiver<'static, CriticalSectionRawMutex, QuadratureEvent, 4>,
     state: &'static QuadratureState,
@@ -405,6 +413,10 @@ fn handle_pcnt_unit_interrupt<const UNIT: usize>(
 }
 
 #[handler(priority = Priority::Priority2)]
+/// Interrupt handler for all configured PCNT quadrature units.
+///
+/// Register this once with `Pcnt::set_interrupt_handler` before spawning
+/// quadrature monitor tasks.
 pub fn pcnt_interrupt_handler() {
     handle_pcnt_unit_interrupt::<0>(&PCNT_UNIT0_BASE, &PCNT_UNIT0_SIGNAL);
     handle_pcnt_unit_interrupt::<1>(&PCNT_UNIT1_BASE, &PCNT_UNIT1_SIGNAL);

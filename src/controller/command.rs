@@ -4,6 +4,7 @@ use crate::desk::{DeskLegSide, OverrideLegDirection};
 use crate::units::{CountDelta, PositionCounts, RelativeCounts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Command consumed by the desk control loop.
 pub enum DeskCommand {
     Home,
     MoveTo(PositionCounts),
@@ -12,6 +13,7 @@ pub enum DeskCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Manual override command for one selected desk leg.
 pub enum OverrideCommand {
     Home {
         side: DeskLegSide,
@@ -24,6 +26,7 @@ pub enum OverrideCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of trying to queue a controller command.
 pub enum CommandSubmission {
     Accepted,
     RejectedBusy,
@@ -34,6 +37,7 @@ pub enum CommandSubmission {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of trying to request a stop.
 pub enum StopSubmission {
     Accepted,
     IgnoredIdle,

@@ -46,6 +46,10 @@ const PWM_FREQUENCY_KHZ: u32 = 20;
     clippy::large_stack_frames,
     reason = "it's not unusual to allocate larger buffers etc. during firmware startup"
 )]
+/// Run firmware setup after HAL/heap bootstrap has completed in `main`.
+///
+/// This function consumes initialized peripherals, starts background tasks, and
+/// then never returns because it awaits the desk control loop.
 pub async fn run(spawner: Spawner, peripherals: Peripherals) -> ! {
     static QUADRATURE1_STORAGE: QuadratureStorage = QuadratureStorage::new();
     static QUADRATURE2_STORAGE: QuadratureStorage = QuadratureStorage::new();

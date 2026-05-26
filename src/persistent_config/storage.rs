@@ -22,12 +22,17 @@ const CONFIG_KEY: Key = Key::from_array(b"runtime");
 
 type ConfigNvs = Nvs<FlashStorage<'static>>;
 
+/// ESP NVS persistence handle for runtime configuration.
+///
+/// The dirty flag lets MQTT defer writes while motion is active and save once
+/// the controller reports persistence is safe.
 pub struct RuntimeConfigPersistence {
     nvs: ConfigNvs,
     dirty: bool,
 }
 
 impl RuntimeConfigPersistence {
+    /// Open the configured NVS partition for runtime config persistence.
     pub fn new(flash: esp_hal::peripherals::FLASH<'static>) -> Result<Self, PersistError> {
         let storage = FlashStorage::new(flash);
         let nvs = Nvs::new(NVS_PARTITION_OFFSET, NVS_PARTITION_SIZE, storage)
@@ -36,6 +41,7 @@ impl RuntimeConfigPersistence {
         Ok(Self { nvs, dirty: false })
     }
 
+    /// Load and decode the saved runtime config from NVS.
     pub fn load(&mut self) -> Result<RuntimeConfig, PersistError> {
         let bytes =
             self.nvs
@@ -48,6 +54,7 @@ impl RuntimeConfigPersistence {
         decode_runtime_config(&bytes)
     }
 
+    /// Encode and save runtime config, clearing the dirty flag on success.
     pub fn save(&mut self, config: RuntimeConfig) -> Result<(), PersistError> {
         let bytes = encode_runtime_config(config);
         self.nvs

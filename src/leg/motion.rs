@@ -14,6 +14,7 @@ use super::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Leg-level motion failures.
 pub enum LegError {
     HomingStartTimeout,
     PolarityMismatch,
@@ -75,6 +76,10 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
 }
 
 impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
+    /// Home the leg downward and return it with ready-state travel limits.
+    ///
+    /// Homing validates encoder polarity, detects the lower end stop by stall,
+    /// backs off, resets the encoder position, and records logical limits.
     pub async fn home_down(mut self) -> Result<Leg<'a, Ready, OP, PWM>, (Self, LegError)> {
         let runtime_config = self.runtime_config_reader.current().leg();
         let start_position = self.encoder_position();
@@ -311,6 +316,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         self.move_steps(self.state.down_direction, steps).await
     }
 
+    /// Move a ready leg to a target within its configured travel limits.
     pub async fn move_to(&mut self, target_position: i32) -> Result<(), LegError> {
         let runtime_config = self.runtime_config_reader.current().leg();
         let target_position = self.clamp_target(target_position);

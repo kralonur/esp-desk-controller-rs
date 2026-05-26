@@ -16,18 +16,21 @@ use super::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Selects which physical leg a manual override command should operate on.
 pub enum DeskLegSide {
     Left,
     Right,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Manual override travel direction for one selected leg.
 pub enum OverrideLegDirection {
     Up,
     Down,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Non-fault outcome from a manual override operation.
 pub enum DeskOverrideOutcome {
     Completed,
     StoppedByRequest,
@@ -42,6 +45,10 @@ impl<
     RightPwm: PwmPeripheral,
 > Desk<'a, State, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>
 {
+    /// Home one selected leg as a manual service/recovery operation.
+    ///
+    /// The non-selected leg is stopped and the desk is always returned unhomed,
+    /// so coordinated movement requires a later full `home_all`.
     pub async fn override_home_leg<StopRequested>(
         self,
         side: DeskLegSide,
@@ -103,6 +110,10 @@ impl<
         }
     }
 
+    /// Move one selected leg by a fixed number of encoder steps.
+    ///
+    /// This is an override/recovery path, not coordinated desk movement. The
+    /// returned desk is unhomed even when the override completes successfully.
     pub async fn override_move_leg<StopRequested>(
         self,
         side: DeskLegSide,

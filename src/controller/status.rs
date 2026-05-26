@@ -3,6 +3,7 @@ use defmt::Format;
 use crate::desk::{DeskError, DeskMoveInvariant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// High-level controller mode published to observers.
 pub enum DeskControllerMode {
     Unhomed,
     Ready,
@@ -13,6 +14,7 @@ pub enum DeskControllerMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Fault remembered by the controller after a desk operation fails.
 pub enum DeskFault {
     LeftLeg(crate::leg::LegError),
     RightLeg(crate::leg::LegError),
@@ -23,6 +25,7 @@ pub enum DeskFault {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Snapshot of controller state used by MQTT responses and status publication.
 pub struct DeskControllerSnapshot {
     pub mode: DeskControllerMode,
     pub command_pending: bool,

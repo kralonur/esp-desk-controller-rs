@@ -16,6 +16,10 @@ use super::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Desk-level failures returned by homing, movement, and override operations.
+///
+/// `Stopped` means the caller-requested stop was handled as a normal outcome;
+/// controller fault reporting intentionally ignores it.
 pub enum DeskError {
     LeftLeg(LegError),
     RightLeg(LegError),
@@ -26,7 +30,15 @@ pub enum DeskError {
     Stopped,
 }
 
+/// Typestate marker for a desk whose shared coordinate frame is not trusted.
+///
+/// A desk starts unhomed and returns to this state after override operations or
+/// faults that can invalidate synchronized two-leg positioning.
 pub struct UnhomedDesk;
+
+/// Typestate marker for a desk that has completed full two-leg homing.
+///
+/// Only `Desk<ReadyDesk, ...>` can run coordinated target moves.
 pub struct ReadyDesk;
 
 #[embassy_executor::task(pool_size = 4)]
@@ -58,6 +70,10 @@ pub(super) type ReadyLegPair<
     &'desk mut Leg<'leg, Ready, RIGHT_OP, RightPwm>,
 );
 
+/// Coordinated two-leg desk.
+///
+/// The `State` typestate controls which operations are available: unhomed desks
+/// can home or run manual override, while ready desks can run target movement.
 pub struct Desk<
     'a,
     State,
@@ -86,6 +102,9 @@ impl<
         self.status_state.current()
     }
 
+    /// Subscribe to desk status changes.
+    ///
+    /// Watchers are intended for async tasks such as MQTT publication.
     pub fn status_watcher(&self) -> DeskStatusWatcher {
         let receiver = self
             .status_state
@@ -96,6 +115,7 @@ impl<
         DeskStatusWatcher { receiver }
     }
 
+    /// Create a cheap reader for polling the latest desk status.
     pub fn status_reader(&self) -> DeskStatusReader {
         DeskStatusReader {
             status_state: self.status_state,
@@ -190,6 +210,10 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         self
     }
 
+    /// Build a desk from two unhomed legs and start status mirroring tasks.
+    ///
+    /// The returned desk must be homed before coordinated target movement is
+    /// available.
     pub fn new(
         storage: &'static DeskStatusStorage,
         runtime_config_reader: RuntimeConfigReader,
@@ -338,6 +362,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         (self, error)
     }
 
+    /// Stop both ready legs and publish the supplied stop reason.
     pub fn stop_with_reason(&mut self, reason: DeskStopReason) {
         self.stop_ready_legs();
         self.update_status(|status| {

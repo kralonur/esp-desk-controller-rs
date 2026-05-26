@@ -21,6 +21,7 @@ const WIFI_SSID: Option<&str> = option_env!("WIFI_SSID");
 const WIFI_PASSWORD: Option<&str> = option_env!("WIFI_PASSWORD");
 
 #[derive(Clone, Copy, Debug, defmt::Format)]
+/// WiFi startup failures before the network stack is ready.
 pub enum WifiSetupError {
     MissingSsid,
     InitFailed,
@@ -75,6 +76,10 @@ async fn wait_for_connection(stack: Stack<'_>) {
     }
 }
 
+/// Start WiFi station mode and return a DHCP-ready network stack.
+///
+/// This spawns the connection supervisor and network runner tasks. Credentials
+/// are read from `WIFI_SSID` and optional `WIFI_PASSWORD` at compile time.
 pub async fn start_wifi(
     wifi: WIFI<'static>,
     rng: Rng,

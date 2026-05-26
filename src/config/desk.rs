@@ -35,6 +35,7 @@ const DEFAULT_HIGH_OBSTRUCTION_PROFILE: ObstructionProfileConfig =
 const DEFAULT_OVERRIDE_UNLOCK_TIMEOUT: Duration = Duration::from_millis(120_000);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+/// Obstruction detection profile selected for coordinated desk movement.
 pub enum ObstructionSensitivity {
     None,
     Low,
@@ -43,12 +44,17 @@ pub enum ObstructionSensitivity {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Thresholds used by obstruction detection.
 pub struct ObstructionProfileConfig {
     minimum_baseline_percent: Percent,
     consecutive_windows: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Runtime settings for coordinated desk behavior.
+///
+/// Validation keeps the move timeout longer than the obstruction detection
+/// window and requires a nonzero override unlock timeout.
 pub struct DeskConfig {
     target_tolerance: CountDelta,
     target_slow_zone: CountDelta,

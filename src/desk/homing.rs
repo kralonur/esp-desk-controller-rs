@@ -13,6 +13,11 @@ use super::{
 impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm: PwmPeripheral>
     Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>
 {
+    /// Home both legs and establish the ready desk coordinate frame.
+    ///
+    /// This operation drives both legs downward until end-stop/stall detection,
+    /// backs off, resets positions, and returns `Desk<ReadyDesk, ...>`. A stop
+    /// request returns the desk still unhomed with `DeskError::Stopped`.
     pub async fn home_all<StopRequested>(
         mut self,
         stop_requested: StopRequested,

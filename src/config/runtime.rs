@@ -6,20 +6,27 @@ use static_cell::StaticCell;
 use crate::config::{ConfigError, DeskConfig, LegRuntimeConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Complete runtime configuration snapshot.
 pub struct RuntimeConfig {
     desk: DeskConfig,
     leg: LegRuntimeConfig,
 }
 
+/// Static storage used to initialize shared runtime config state.
 pub struct RuntimeConfigStorage {
     state: StaticCell<RuntimeConfigState>,
 }
 
+/// Shared in-memory runtime configuration.
+///
+/// Updates are validated before being installed so readers never observe an
+/// invalid config snapshot.
 pub struct RuntimeConfigState {
     config: Mutex<CriticalSectionRawMutex, Cell<RuntimeConfig>>,
 }
 
 #[derive(Clone, Copy)]
+/// Cheap copyable reader for the current runtime configuration.
 pub struct RuntimeConfigReader {
     state: &'static RuntimeConfigState,
 }
@@ -54,6 +61,7 @@ impl RuntimeConfig {
         self.leg
     }
 
+    /// Mutate desk config transactionally, reverting if validation fails.
     pub fn update_desk(
         &mut self,
         update_fn: impl FnOnce(&mut DeskConfig) -> Result<(), &'static str>,
@@ -68,6 +76,7 @@ impl RuntimeConfig {
         }
     }
 
+    /// Mutate leg config transactionally, reverting if validation fails.
     pub fn update_leg(
         &mut self,
         update_fn: impl FnOnce(&mut LegRuntimeConfig) -> Result<(), &'static str>,
@@ -123,6 +132,7 @@ impl RuntimeConfigState {
         self.config.lock(|config| config.get())
     }
 
+    /// Replace the active config after validation and return the previous one.
     pub fn replace(&self, new_config: RuntimeConfig) -> Result<RuntimeConfig, ConfigError> {
         new_config.validate()?;
         Ok(self.config.lock(|config| {
@@ -132,6 +142,7 @@ impl RuntimeConfigState {
         }))
     }
 
+    /// Mutate the active config in place if the resulting snapshot validates.
     pub fn update(
         &self,
         update_fn: impl FnOnce(&mut RuntimeConfig),

@@ -22,6 +22,10 @@ use super::{
 };
 
 #[embassy_executor::task]
+/// Run one MQTT command/status session.
+///
+/// Most callers should use `spawn_mqtt`; this entrypoint exists for the spawned
+/// Embassy task and owns reconnect/session behavior.
 pub async fn mqtt_task(
     stack: Stack<'static>,
     state: &'static DeskControllerState,
@@ -280,6 +284,7 @@ async fn subscribe_commands<'a>(
     Ok(())
 }
 
+/// Spawn the MQTT task with the command controller and status/config sources.
 pub fn spawn_mqtt(
     spawner: &Spawner,
     stack: Stack<'static>,

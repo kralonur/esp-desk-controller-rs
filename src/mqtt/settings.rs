@@ -56,6 +56,7 @@ pub(super) struct MqttSettings {
 }
 
 #[derive(Clone, Copy, Debug, defmt::Format)]
+/// MQTT setup failures while loading environment-derived settings.
 pub enum MqttSetupError {
     MissingBrokerAddr,
     MissingClientId,

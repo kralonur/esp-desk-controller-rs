@@ -20,6 +20,7 @@ use super::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Non-fault outcomes from a ready-state desk move.
 pub enum DeskMoveOutcome {
     Completed,
     StoppedByRequest,
@@ -27,11 +28,16 @@ pub enum DeskMoveOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
+/// Internal movement invariant violations that require fault handling.
 pub enum DeskMoveInvariant {
     DirectionMismatch,
     WrongWayProgress,
 }
 
+/// Fault result from ready-state movement.
+///
+/// Some faults preserve the ready typestate, while faults that invalidate the
+/// shared coordinate frame return an unhomed desk so the caller must rehome.
 pub enum DeskMoveError<
     'a,
     const LEFT_OP: u8,
@@ -167,6 +173,11 @@ impl ReadyMoveLoop {
 impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm: PwmPeripheral>
     Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>
 {
+    /// Move a homed desk to an absolute target within the configured limits.
+    ///
+    /// The move may complete, stop by user request, stop by obstruction, or
+    /// fault. Faults that make synchronization untrustworthy return an unhomed
+    /// desk through `DeskMoveError::FaultedUnhomed`.
     pub async fn move_to<StopRequested>(
         mut self,
         target_position: PositionCounts,
