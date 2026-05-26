@@ -33,6 +33,7 @@ const DEFAULT_MEDIUM_OBSTRUCTION_PROFILE: ObstructionProfileConfig =
 const DEFAULT_HIGH_OBSTRUCTION_PROFILE: ObstructionProfileConfig =
     ObstructionProfileConfig::new(Percent::new(80), 2);
 const DEFAULT_OVERRIDE_UNLOCK_TIMEOUT: Duration = Duration::from_millis(120_000);
+const DEFAULT_MQTT_STATUS_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
 /// Obstruction detection profile selected for coordinated desk movement.
@@ -54,7 +55,7 @@ pub struct ObstructionProfileConfig {
 /// Runtime settings for coordinated desk behavior.
 ///
 /// Validation keeps the move timeout longer than the obstruction detection
-/// window and requires a nonzero override unlock timeout.
+/// window and requires nonzero operator-facing timeouts/intervals.
 pub struct DeskConfig {
     target_tolerance: CountDelta,
     target_slow_zone: CountDelta,
@@ -83,6 +84,7 @@ pub struct DeskConfig {
     medium_obstruction_profile: ObstructionProfileConfig,
     high_obstruction_profile: ObstructionProfileConfig,
     override_unlock_timeout: Duration,
+    mqtt_status_publish_interval: Duration,
 }
 
 impl DeskConfig {
@@ -115,6 +117,7 @@ impl DeskConfig {
             medium_obstruction_profile: DEFAULT_MEDIUM_OBSTRUCTION_PROFILE,
             high_obstruction_profile: DEFAULT_HIGH_OBSTRUCTION_PROFILE,
             override_unlock_timeout: DEFAULT_OVERRIDE_UNLOCK_TIMEOUT,
+            mqtt_status_publish_interval: DEFAULT_MQTT_STATUS_PUBLISH_INTERVAL,
         };
         assert!(config.is_valid(), "invalid default desk config");
         config
@@ -131,6 +134,7 @@ impl DeskConfig {
     const fn is_valid(self) -> bool {
         self.move_timeout.as_millis() > default_obstruction_detection_time_ms(self)
             && self.override_unlock_timeout.as_millis() > 0
+            && self.mqtt_status_publish_interval.as_millis() > 0
     }
 
     fn update_checked(&mut self, update_fn: impl FnOnce(&mut Self)) -> Result<(), ConfigError> {
@@ -226,6 +230,10 @@ impl DeskConfig {
 
     pub fn override_unlock_timeout(self) -> Duration {
         self.override_unlock_timeout
+    }
+
+    pub fn mqtt_status_publish_interval(self) -> Duration {
+        self.mqtt_status_publish_interval
     }
 
     pub fn set_target_tolerance(&mut self, value: CountDelta) -> Result<(), ConfigError> {
@@ -346,6 +354,10 @@ impl DeskConfig {
 
     pub fn set_override_unlock_timeout(&mut self, value: Duration) -> Result<(), ConfigError> {
         self.update_checked(|config| config.override_unlock_timeout = value)
+    }
+
+    pub fn set_mqtt_status_publish_interval(&mut self, value: Duration) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.mqtt_status_publish_interval = value)
     }
 
     pub fn move_timeout(self) -> Duration {

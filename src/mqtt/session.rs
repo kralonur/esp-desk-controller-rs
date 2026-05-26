@@ -1,8 +1,8 @@
 use defmt::{info, warn};
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either3, select3};
+use embassy_futures::select::{Either4, select4};
 use embassy_net::{Stack, tcp::TcpSocket};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use rust_mqtt::{
     buffer::AllocBuffer,
     client::{MqttError, options::SubscriptionOptions},
@@ -155,15 +155,28 @@ async fn run_mqtt_session(
         return;
     }
 
+    let mut last_status_published_at = Instant::now();
+    let mut pending_status = false;
+    let mut next_ping_at = last_status_published_at + settings.ping_interval;
+
     loop {
-        match select3(
+        let status_publish_interval = runtime_config_state
+            .current()
+            .desk()
+            .mqtt_status_publish_interval();
+        match select4(
             command_client.poll_header(),
             status_watcher.wait_for_change(),
-            Timer::after(settings.ping_interval),
+            wait_for_status_publish(
+                pending_status,
+                last_status_published_at,
+                status_publish_interval,
+            ),
+            Timer::at(next_ping_at),
         )
         .await
         {
-            Either3::First(Ok(header)) => {
+            Either4::First(Ok(header)) => {
                 let event = match command_client.poll_body(header).await {
                     Ok(event) => event,
                     Err(error) => {
@@ -192,6 +205,10 @@ async fn run_mqtt_session(
                         warn!("mqtt status publish failed: {:?}", error);
                         return;
                     }
+                    if response.publish_status {
+                        last_status_published_at = Instant::now();
+                        pending_status = false;
+                    }
                     if response.publish_config
                         && let Err(error) =
                             publish_config(&mut publisher_client, settings, runtime_config_state)
@@ -202,15 +219,12 @@ async fn run_mqtt_session(
                     }
                 }
             }
-            Either3::First(Err(error)) => {
+            Either4::First(Err(error)) => {
                 warn!("mqtt command header poll failed: {:?}", error);
                 return;
             }
-            Either3::Second(_status) => {
-                if let Err(error) = publish_status(&mut publisher_client, settings, state).await {
-                    warn!("mqtt status publish failed: {:?}", error);
-                    return;
-                }
+            Either4::Second(_status) => {
+                pending_status = true;
                 if let Some(response) = flush_deferred_config(
                     state,
                     runtime_config_state,
@@ -231,8 +245,29 @@ async fn run_mqtt_session(
                         return;
                     }
                 }
+                if status_publish_due(
+                    pending_status,
+                    last_status_published_at,
+                    status_publish_interval,
+                ) {
+                    if let Err(error) = publish_status(&mut publisher_client, settings, state).await
+                    {
+                        warn!("mqtt status publish failed: {:?}", error);
+                        return;
+                    }
+                    last_status_published_at = Instant::now();
+                    pending_status = false;
+                }
             }
-            Either3::Third(_) => {
+            Either4::Third(_) => {
+                if let Err(error) = publish_status(&mut publisher_client, settings, state).await {
+                    warn!("mqtt status publish failed: {:?}", error);
+                    return;
+                }
+                last_status_published_at = Instant::now();
+                pending_status = false;
+            }
+            Either4::Fourth(_) => {
                 if let Err(error) = command_client.ping().await {
                     warn!("mqtt command ping failed: {:?}", error);
                     return;
@@ -241,9 +276,30 @@ async fn run_mqtt_session(
                     warn!("mqtt publisher ping failed: {:?}", error);
                     return;
                 }
+                next_ping_at = Instant::now() + settings.ping_interval;
             }
         }
     }
+}
+
+async fn wait_for_status_publish(
+    pending_status: bool,
+    last_status_published_at: Instant,
+    interval: Duration,
+) {
+    if pending_status {
+        Timer::at(last_status_published_at + interval).await;
+    } else {
+        core::future::pending::<()>().await;
+    }
+}
+
+fn status_publish_due(
+    pending_status: bool,
+    last_status_published_at: Instant,
+    interval: Duration,
+) -> bool {
+    pending_status && Instant::now().saturating_duration_since(last_status_published_at) >= interval
 }
 
 async fn connect_socket<'a>(

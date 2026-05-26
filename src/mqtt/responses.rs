@@ -163,6 +163,7 @@ desk.medium_obstruction_windows={}\n\
 desk.high_obstruction_min_percent={}\n\
 desk.high_obstruction_windows={}\n\
 desk.override_unlock_timeout_ms={}\n\
+desk.mqtt_status_publish_interval_ms={}\n\
 leg.startup_duty={}\n\
 leg.max_duty={}\n\
 leg.run_duty={}\n\
@@ -207,6 +208,7 @@ leg.target_tolerance={}\n",
         high_profile.minimum_baseline_percent().get(),
         high_profile.consecutive_windows(),
         desk.override_unlock_timeout().as_millis(),
+        desk.mqtt_status_publish_interval().as_millis(),
         leg.startup_duty().get(),
         leg.max_duty().get(),
         leg.run_duty().get(),

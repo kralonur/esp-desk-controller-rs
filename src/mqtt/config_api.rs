@@ -277,6 +277,10 @@ pub(super) fn handle_config_set(
             desk.set_override_unlock_timeout(parse_duration_ms(payload)?)
                 .map_err(config_error_name)
         }),
+        "desk/mqtt_status_publish_interval_ms" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_mqtt_status_publish_interval(parse_duration_ms(payload)?)
+                .map_err(config_error_name)
+        }),
         "leg/startup_duty" => apply_leg_update(runtime_config_state, |leg| {
             leg.set_startup_duty(parse_duty_percent(payload)?)
                 .map_err(config_error_name)

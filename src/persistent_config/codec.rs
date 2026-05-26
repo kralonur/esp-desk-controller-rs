@@ -30,7 +30,7 @@ const CONFIG_HEADER_LEN: usize = CONFIG_MAGIC_LEN + CONFIG_VERSION_LEN;
 const DESK_CONFIG_LEN: usize = COUNT_DELTA_LEN * 10
     + DUTY_PERCENT_LEN * 4
     + DUTY_TRIM_LEN * 2
-    + DURATION_MS_LEN * 6
+    + DURATION_MS_LEN * 7
     + OBSTRUCTION_SENSITIVITY_LEN
     + OBSTRUCTION_PROFILE_LEN * 3
     + DURATION_MS_LEN;
@@ -71,6 +71,7 @@ pub fn encode_runtime_config(config: RuntimeConfig) -> Vec<u8> {
     push_profile(&mut out, desk, ObstructionSensitivity::Medium);
     push_profile(&mut out, desk, ObstructionSensitivity::High);
     push_duration(&mut out, desk.override_unlock_timeout());
+    push_duration(&mut out, desk.mqtt_status_publish_interval());
 
     let leg = config.leg();
     push_duty(&mut out, leg.startup_duty());
@@ -157,6 +158,8 @@ pub fn decode_runtime_config(bytes: &[u8]) -> Result<RuntimeConfig, PersistError
     desk.set_high_obstruction_profile(reader.read_profile()?)
         .map_err(config_error)?;
     desk.set_override_unlock_timeout(reader.read_duration()?)
+        .map_err(config_error)?;
+    desk.set_mqtt_status_publish_interval(reader.read_duration()?)
         .map_err(config_error)?;
 
     let mut leg = LegRuntimeConfig::new();
