@@ -374,7 +374,7 @@ mod tests {
             .update_desk(|desk| {
                 desk.set_min_move_duty(DutyPercent::new(23))
                     .map_err(|_| "invalid_config")?;
-                desk.set_fault_skew_counts(CountDelta::new(100_091))
+                desk.set_fault_skew_counts(CountDelta::new(1_000))
                     .map_err(|_| "invalid_config")
             })
             .unwrap();

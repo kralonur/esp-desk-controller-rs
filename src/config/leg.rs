@@ -71,10 +71,51 @@ impl LegRuntimeConfig {
     }
 
     const fn is_valid(self) -> bool {
-        self.default_max_position.get() >= 0
+        // Every leg move begins with boost.
+        self.startup_duty.get() > 0
+            // Max duty must not clamp all active drive modes to stopped.
+            && self.max_duty.get() > 0
+            // Normal leg movement needs drive.
+            && self.run_duty.get() > 0
+            // Near-target leg movement still needs drive.
+            && self.slow_duty.get() > 0
+            // Homing must drive downward until stall.
+            && self.homing_duty.get() > 0
+            // Startup duty should not be silently clamped by max duty.
+            && self.startup_duty.get() <= self.max_duty.get()
+            // Run duty should not be silently clamped by max duty.
+            && self.run_duty.get() <= self.max_duty.get()
+            // Entering the slow zone must not increase speed.
+            && self.slow_duty.get() <= self.run_duty.get()
+            // Homing duty should not be silently clamped by max duty.
+            && self.homing_duty.get() <= self.max_duty.get()
+            // A homed leg needs a usable travel range.
+            && self.default_max_position.get() > 0
+            // Startup phase must fit inside travel range.
+            && self.startup_events.get() <= self.default_max_position.get() as u32
+            // Backoff must lift off the end stop before resetting position.
+            && self.homing_backoff_steps.get() > 0
+            // Backoff must fit inside travel range.
+            && self.homing_backoff_steps.get() <= self.default_max_position.get() as u32
+            // Backoff should not finish entirely in startup boost.
+            && self.startup_events.get() <= self.homing_backoff_steps.get()
+            // Slow zone should include the final tolerance band.
+            && self.target_slow_zone.get() >= self.target_tolerance.get()
+            // Slow zone must fit inside travel range.
+            && self.target_slow_zone.get() <= self.default_max_position.get() as u32
+            // Startup failure detection must be enabled.
             && self.homing_start_timeout.as_millis() > 0
+            // End-stop/stall detection must be enabled.
             && self.homing_stall_timeout.as_millis() > 0
+            // Homing and override loops sleep for this interval.
             && self.homing_poll_interval.as_millis() > 0
+            // Startup timeout must allow at least one scheduled poll.
+            && self.homing_start_timeout.as_millis() >= self.homing_poll_interval.as_millis()
+            // Stall timeout must allow at least one scheduled poll.
+            && self.homing_stall_timeout.as_millis() >= self.homing_poll_interval.as_millis()
+            // Override moves observe progress on the homing poll cadence.
+            && self.move_stall_timeout.as_millis() >= self.homing_poll_interval.as_millis()
+            // Ready leg moves need progress timeout enabled.
             && self.move_stall_timeout.as_millis() > 0
     }
 
@@ -205,5 +246,46 @@ impl LegRuntimeConfig {
 impl Default for LegRuntimeConfig {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_zero_default_max_position() {
+        let mut config = LegRuntimeConfig::default();
+        assert_eq!(
+            config.set_default_max_position(PositionCounts::new(0)),
+            Err(ConfigError::InvalidLegConfig)
+        );
+    }
+
+    #[test]
+    fn rejects_backoff_beyond_default_max_position() {
+        let mut config = LegRuntimeConfig::default();
+        assert_eq!(
+            config.set_default_max_position(PositionCounts::new(10)),
+            Err(ConfigError::InvalidLegConfig)
+        );
+    }
+
+    #[test]
+    fn rejects_slow_duty_above_run_duty() {
+        let mut config = LegRuntimeConfig::default();
+        assert_eq!(
+            config.set_slow_duty(DutyPercent::new(31)),
+            Err(ConfigError::InvalidLegConfig)
+        );
+    }
+
+    #[test]
+    fn rejects_timeout_below_poll_interval() {
+        let mut config = LegRuntimeConfig::default();
+        assert_eq!(
+            config.set_homing_poll_interval(Duration::from_millis(700)),
+            Err(ConfigError::InvalidLegConfig)
+        );
     }
 }

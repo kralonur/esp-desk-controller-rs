@@ -132,13 +132,77 @@ impl DeskConfig {
     }
 
     const fn is_valid(self) -> bool {
+        // Allow enough time for obstruction warmup plus slow-window detection.
         self.move_timeout.as_millis() > default_obstruction_detection_time_ms(self)
+            // Avoid zero-duration obstruction speed windows.
             && self.obstruction_sample_window.as_millis() > 0
+            // Give motion time to settle before establishing obstruction baseline.
             && self.obstruction_warmup_duration.as_millis() > 0
+            // Wrong-way detection uses this as its retreat threshold.
+            && self.obstruction_warmup_counts.get() > 0
+            // Active synchronized moves must not clamp down to stopped.
+            && self.min_move_duty.get() > 0
+            // Normal coordinated move duty must drive the motor.
+            && self.move_run_duty.get() > 0
+            // Near-target move duty must still drive the motor.
+            && self.move_slow_duty.get() > 0
+            // Coordinated homing needs drive after startup boost.
+            && self.homing_run_duty.get() > 0
+            // Entering the slow zone must not increase speed.
+            && self.move_run_duty.get() >= self.move_slow_duty.get()
+            // Keep run duty from being silently clamped by min_move_duty.
+            && self.move_run_duty.get() >= self.min_move_duty.get()
+            // Keep slow duty from being silently clamped by min_move_duty.
+            && self.move_slow_duty.get() >= self.min_move_duty.get()
+            // Keep homing duty from being silently clamped by min_move_duty.
+            && self.homing_run_duty.get() >= self.min_move_duty.get()
+            // Negative trim would reverse leader/follower correction.
+            && self.move_sync_duty_step.get() >= 0
+            // Homing sync trim follows the same correction direction.
+            && self.homing_sync_duty_step.get() >= 0
+            // Homing loops sleep for this interval each iteration.
             && self.homing_poll_interval.as_millis() > 0
+            // Startup failure detection must be enabled.
             && self.homing_start_timeout.as_millis() > 0
+            // End-stop/stall detection must be enabled.
             && self.homing_stall_timeout.as_millis() > 0
+            // Startup timeout must allow at least one scheduled poll.
+            && self.homing_start_timeout.as_millis() >= self.homing_poll_interval.as_millis()
+            // Stall timeout must allow at least one scheduled poll.
+            && self.homing_stall_timeout.as_millis() >= self.homing_poll_interval.as_millis()
+            // Backoff progress timeout must allow at least one scheduled poll.
+            && self.move_timeout.as_millis() >= self.homing_poll_interval.as_millis()
+            // Backoff must lift off the end stop before resetting position.
+            && self.homing_backoff_steps.get() > 0
+            // Slow zone should include the final tolerance band.
+            && self.target_slow_zone.get() >= self.target_tolerance.get()
+            // Catch-up needs enter/exit hysteresis.
+            && self.catch_up_enter_counts.get() > self.catch_up_exit_counts.get()
+            // Leaving catch-up can still enter speed matching if skew remains.
+            && self.catch_up_exit_counts.get() >= self.sync_speedup_enter_counts.get()
+            // Speed matching needs enter/exit hysteresis.
+            && self.sync_speedup_enter_counts.get() > self.sync_speedup_exit_counts.get()
+            // Correction should engage before ready-move skew fault.
+            && self.fault_skew_counts.get() > self.catch_up_enter_counts.get()
+            // Correction should engage before homing skew fault.
+            && self.homing_fault_skew_counts.get() > self.catch_up_enter_counts.get()
+            // Final tolerance on both legs must stay within skew fault limit.
+            && self.fault_skew_counts.get() / 2 >= self.target_tolerance.get()
+            // Low profile can be selected or loaded at runtime.
+            && self.low_obstruction_profile.is_valid()
+            // Medium profile can be selected or loaded at runtime.
+            && self.medium_obstruction_profile.is_valid()
+            // High profile can be selected or loaded at runtime.
+            && self.high_obstruction_profile.is_valid()
+            // Profile names preserve low-to-high sensitivity order.
+            && obstruction_profiles_ordered(
+                self.low_obstruction_profile,
+                self.medium_obstruction_profile,
+                self.high_obstruction_profile,
+            )
+            // Override access must eventually expire.
             && self.override_unlock_timeout.as_millis() > 0
+            // Status publishing must not spin continuously.
             && self.mqtt_status_publish_interval.as_millis() > 0
     }
 
@@ -415,6 +479,65 @@ impl ObstructionProfileConfig {
     pub const fn consecutive_windows(self) -> u8 {
         self.consecutive_windows
     }
+
+    const fn is_valid(self) -> bool {
+        // Zero percent makes the obstruction threshold zero, disabling detection.
+        self.minimum_baseline_percent.get() > 0
+            // At least one slow window is needed to declare obstruction.
+            && self.consecutive_windows > 0
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_target_slow_zone_below_tolerance() {
+        let mut config = DeskConfig::default();
+        assert_eq!(
+            config.set_target_slow_zone(CountDelta::new(1)),
+            Err(ConfigError::InvalidDeskConfig)
+        );
+    }
+
+    #[test]
+    fn rejects_negative_sync_trim() {
+        let mut config = DeskConfig::default();
+        assert_eq!(
+            config.set_move_sync_duty_step(DutyPercentTrim::new(-1)),
+            Err(ConfigError::InvalidDeskConfig)
+        );
+    }
+
+    #[test]
+    fn rejects_disordered_sync_thresholds() {
+        let mut config = DeskConfig::default();
+        assert_eq!(
+            config.set_catch_up_exit_counts(CountDelta::new(31)),
+            Err(ConfigError::InvalidDeskConfig)
+        );
+    }
+
+    #[test]
+    fn rejects_zero_obstruction_profile_percent() {
+        let mut config = DeskConfig::default();
+        let profile = ObstructionProfileConfig::new(Percent::new(0), 2);
+        assert_eq!(
+            config.set_high_obstruction_profile(profile),
+            Err(ConfigError::InvalidDeskConfig)
+        );
+    }
+
+    #[test]
+    fn rejects_unordered_obstruction_profiles() {
+        let mut config = DeskConfig::default();
+        let profile = ObstructionProfileConfig::new(Percent::new(90), 3);
+        assert_eq!(
+            config.set_low_obstruction_profile(profile),
+            Err(ConfigError::InvalidDeskConfig)
+        );
+    }
 }
 
 const fn obstruction_detection_time_ms_for_windows(
@@ -450,4 +573,15 @@ const fn obstruction_detection_time_ms_from_sensitivity(
         }
         None => 0,
     }
+}
+
+const fn obstruction_profiles_ordered(
+    low: ObstructionProfileConfig,
+    medium: ObstructionProfileConfig,
+    high: ObstructionProfileConfig,
+) -> bool {
+    low.minimum_baseline_percent().get() <= medium.minimum_baseline_percent().get()
+        && medium.minimum_baseline_percent().get() <= high.minimum_baseline_percent().get()
+        && low.consecutive_windows() >= medium.consecutive_windows()
+        && medium.consecutive_windows() >= high.consecutive_windows()
 }

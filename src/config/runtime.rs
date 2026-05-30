@@ -42,11 +42,51 @@ impl RuntimeConfig {
     pub const fn validate(self) -> Result<Self, ConfigError> {
         match self.desk.validate() {
             Ok(_) => match self.leg.validate() {
-                Ok(_) => Ok(self),
+                Ok(_) => {
+                    if self.is_cross_valid() {
+                        Ok(self)
+                    } else {
+                        Err(ConfigError::InvalidDeskConfig)
+                    }
+                }
                 Err(error) => Err(error),
             },
             Err(error) => Err(error),
         }
+    }
+
+    const fn is_cross_valid(self) -> bool {
+        let max_duty = self.leg.max_duty().get();
+        let max_position = self.leg.default_max_position().get() as u32;
+
+        // Leg drive clamps every requested desk duty at max_duty.
+        self.desk.min_move_duty().get() <= max_duty
+            // Avoid silent clamping during coordinated moves.
+            && self.desk.move_run_duty().get() <= max_duty
+            // Avoid silent clamping near the target.
+            && self.desk.move_slow_duty().get() <= max_duty
+            // Avoid silent clamping during coordinated homing.
+            && self.desk.homing_run_duty().get() <= max_duty
+            // Desk tolerance must fit inside ready travel range.
+            && self.desk.target_tolerance().get() <= max_position
+            // Desk slow zone must fit inside ready travel range.
+            && self.desk.target_slow_zone().get() <= max_position
+            // Obstruction warmup travel must be reachable.
+            && self.desk.obstruction_warmup_counts().get() <= max_position
+            // Coordinated homing backoff must be reachable.
+            && self.desk.homing_backoff_steps().get() <= max_position
+            // Speedup enter threshold must fit inside travel range.
+            && self.desk.sync_speedup_enter_counts().get() <= max_position
+            // Speedup exit threshold must fit inside travel range.
+            && self.desk.sync_speedup_exit_counts().get() <= max_position
+            // Catch-up enter threshold must fit inside travel range.
+            && self.desk.catch_up_enter_counts().get() <= max_position
+            // Catch-up exit threshold must fit inside travel range.
+            && self.desk.catch_up_exit_counts().get() <= max_position
+            // Ready-move skew fault threshold must fit inside travel range.
+            && self.desk.fault_skew_counts().get() <= max_position
+            // Homing skew fault threshold must fit inside travel range.
+            && self.desk.homing_fault_skew_counts().get() <= max_position
     }
 
     pub const fn from_parts(desk: DeskConfig, leg: LegRuntimeConfig) -> Result<Self, ConfigError> {
@@ -164,5 +204,43 @@ impl RuntimeConfigState {
 impl RuntimeConfigReader {
     pub fn current(self) -> RuntimeConfig {
         self.state.current()
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+    use crate::units::{CountDelta, DutyPercent};
+
+    #[test]
+    fn rejects_desk_duty_above_leg_max_duty() {
+        let mut config = RuntimeConfig::default();
+        assert!(
+            config
+                .update_leg(|leg| {
+                    leg.set_startup_duty(DutyPercent::new(25))
+                        .map_err(|_| "invalid_config")?;
+                    leg.set_run_duty(DutyPercent::new(20))
+                        .map_err(|_| "invalid_config")?;
+                    leg.set_homing_duty(DutyPercent::new(20))
+                        .map_err(|_| "invalid_config")?;
+                    leg.set_max_duty(DutyPercent::new(25))
+                        .map_err(|_| "invalid_config")
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_desk_count_threshold_above_leg_travel() {
+        let mut config = RuntimeConfig::default();
+        assert!(
+            config
+                .update_desk(|desk| {
+                    desk.set_homing_fault_skew_counts(CountDelta::new(3_000))
+                        .map_err(|_| "invalid_config")
+                })
+                .is_err()
+        );
     }
 }
