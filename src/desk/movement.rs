@@ -6,7 +6,7 @@ use esp_hal::mcpwm::PwmPeripheral;
 use crate::{
     config::{DeskConfig, LegRuntimeConfig},
     leg::{LegProgressWatcher, LegStatus},
-    units::PositionCounts,
+    units::{PositionCounts, average_position},
 };
 
 use super::{
@@ -15,7 +15,6 @@ use super::{
         validate_move_start, validate_move_step,
     },
     planning::{SyncPhase, TravelDirection, apply_dual_plan, next_sync_phase, plan_move},
-    position::average_position,
     state::{Desk, DeskError, ReadyDesk, UnhomedDesk},
     status::DeskStopReason,
 };

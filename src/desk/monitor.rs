@@ -2,13 +2,12 @@ use embassy_time::Instant;
 
 use crate::{
     config::{DeskConfig, ObstructionProfileConfig},
-    units::{DutyPercent, PositionCounts},
+    units::{DutyPercent, PositionCounts, abs_position_delta, average_position, position_delta},
 };
 
 use super::{
     movement::{DeskMoveInvariant, DeskMoveOutcome},
     planning::{SyncPhase, TravelDirection},
-    position::{abs_position_delta, average_position, position_delta},
     state::DeskError,
     status::DeskStatus,
 };

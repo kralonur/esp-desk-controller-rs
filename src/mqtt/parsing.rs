@@ -18,16 +18,16 @@ pub(super) fn parse_position_counts(value: &str) -> Result<PositionCounts, &'sta
 }
 
 pub(super) fn parse_count_delta(value: &str) -> Result<CountDelta, &'static str> {
-    match u16::from_str(value) {
-        Ok(value) => Ok(CountDelta::new(value)),
+    match u32::from_str(value) {
+        Ok(value) => CountDelta::try_new(value).ok_or("invalid_payload"),
         Err(_) => Err("invalid_payload"),
     }
 }
 
 pub(super) fn parse_override_steps(value: &str) -> Result<CountDelta, &'static str> {
-    match u16::from_str(value) {
+    match u32::from_str(value) {
         Ok(0) | Err(_) => Err("invalid_payload"),
-        Ok(value) => Ok(CountDelta::new(value)),
+        Ok(value) => CountDelta::try_new(value).ok_or("invalid_payload"),
     }
 }
 

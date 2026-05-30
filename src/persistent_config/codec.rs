@@ -12,13 +12,14 @@ use crate::units::{CountDelta, DutyPercent, DutyPercentTrim, Percent, PositionCo
 // Private blob format marker for this firmware. This lets us reject unrelated/corrupt NVS blobs
 // before decoding fields as runtime config.
 const CONFIG_MAGIC: [u8; 4] = *b"DPWM";
-const CONFIG_VERSION: u16 = 1;
+const CONFIG_VERSION: u16 = 2;
 
 const U8_LEN: usize = core::mem::size_of::<u8>();
 const I32_LEN: usize = core::mem::size_of::<i32>();
 const U16_LEN: usize = core::mem::size_of::<u16>();
+const U32_LEN: usize = core::mem::size_of::<u32>();
 const U64_LEN: usize = core::mem::size_of::<u64>();
-const COUNT_DELTA_LEN: usize = U16_LEN;
+const COUNT_DELTA_LEN: usize = U32_LEN;
 const DUTY_PERCENT_LEN: usize = U8_LEN;
 const DUTY_TRIM_LEN: usize = U8_LEN;
 const DURATION_MS_LEN: usize = U64_LEN;
@@ -212,7 +213,7 @@ fn push_profile(out: &mut Vec<u8>, desk: DeskConfig, sensitivity: ObstructionSen
 }
 
 fn push_count_delta(out: &mut Vec<u8>, value: CountDelta) {
-    push_u16(out, value.get());
+    push_u32(out, value.get());
 }
 
 fn push_duty(out: &mut Vec<u8>, value: DutyPercent) {
@@ -228,6 +229,10 @@ fn push_duration(out: &mut Vec<u8>, value: Duration) {
 }
 
 fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -268,7 +273,7 @@ impl<'a> ConfigReader<'a> {
     }
 
     fn read_count_delta(&mut self) -> Result<CountDelta, PersistError> {
-        Ok(CountDelta::new(self.read_u16()?))
+        CountDelta::try_new(self.read_u32()?).ok_or(PersistError::InvalidConfig)
     }
 
     fn read_duty(&mut self) -> Result<DutyPercent, PersistError> {
@@ -319,6 +324,10 @@ impl<'a> ConfigReader<'a> {
         Ok(u16::from_le_bytes(self.read_exact::<2>()?))
     }
 
+    fn read_u32(&mut self) -> Result<u32, PersistError> {
+        Ok(u32::from_le_bytes(self.read_exact::<4>()?))
+    }
+
     fn read_u64(&mut self) -> Result<u64, PersistError> {
         Ok(u64::from_le_bytes(self.read_exact::<8>()?))
     }
@@ -365,7 +374,7 @@ mod tests {
             .update_desk(|desk| {
                 desk.set_min_move_duty(DutyPercent::new(23))
                     .map_err(|_| "invalid_config")?;
-                desk.set_fault_skew_counts(CountDelta::new(91))
+                desk.set_fault_skew_counts(CountDelta::new(100_091))
                     .map_err(|_| "invalid_config")
             })
             .unwrap();
@@ -404,7 +413,7 @@ mod tests {
     #[test]
     fn rejects_invalid_duty() {
         let mut bytes = encode_runtime_config(RuntimeConfig::default());
-        bytes[36] = 101;
+        bytes[42] = 101;
         assert_eq!(
             decode_runtime_config(&bytes),
             Err(PersistError::InvalidConfig)

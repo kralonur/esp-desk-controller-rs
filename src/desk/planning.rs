@@ -3,12 +3,11 @@ use esp_hal::mcpwm::PwmPeripheral;
 use crate::{
     config::{DeskConfig, LegRuntimeConfig},
     leg::{DriveMode, Leg},
-    units::{DutyPercent, DutyPercentTrim},
+    units::{DutyPercent, DutyPercentTrim, positive_position_delta},
 };
 
 use super::{
     monitor::{AxisTargetState, MoveSnapshot},
-    position::position_delta,
     status::DeskMotionState,
 };
 
@@ -66,8 +65,8 @@ impl TravelDirection {
 
     pub(super) fn travel(self, start_position: i32, current_position: i32) -> i32 {
         match self {
-            Self::Up => position_delta(current_position, start_position).max(0),
-            Self::Down => position_delta(start_position, current_position).max(0),
+            Self::Up => positive_position_delta(current_position, start_position),
+            Self::Down => positive_position_delta(start_position, current_position),
         }
     }
 }

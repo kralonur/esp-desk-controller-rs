@@ -4,7 +4,7 @@ use esp_hal::mcpwm::PwmPeripheral;
 use crate::{
     config::LegRuntimeConfig,
     quadrature::QuadratureDirection,
-    units::{DutyPercent, PWM_TIMER_MAX_TICKS},
+    units::{DutyPercent, PWM_TIMER_MAX_TICKS, positive_position_delta},
 };
 
 use super::{
@@ -205,8 +205,8 @@ pub(super) fn travel_in_direction(
     direction: QuadratureDirection,
 ) -> i32 {
     match direction {
-        QuadratureDirection::Positive => (current_position - start_position).max(0),
-        QuadratureDirection::Negative => (start_position - current_position).max(0),
+        QuadratureDirection::Positive => positive_position_delta(current_position, start_position),
+        QuadratureDirection::Negative => positive_position_delta(start_position, current_position),
         QuadratureDirection::Invalid => 0,
     }
 }

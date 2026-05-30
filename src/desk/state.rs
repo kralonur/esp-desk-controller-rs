@@ -5,11 +5,11 @@ use esp_hal::mcpwm::PwmPeripheral;
 use crate::{
     config::RuntimeConfigReader,
     leg::{Leg, LegError, LegStatusWatcher, Ready, Unhomed},
+    units::{abs_position_delta, average_position},
 };
 
 use super::{
     movement::DeskMoveInvariant,
-    position::{abs_position_delta, average_position},
     status::{
         DeskMotionState, DeskSide, DeskStatus, DeskStatusReader, DeskStatusState,
         DeskStatusStorage, DeskStatusWatcher, DeskStopReason,

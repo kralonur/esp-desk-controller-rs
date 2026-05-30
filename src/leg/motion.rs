@@ -5,6 +5,7 @@ use esp_hal::mcpwm::PwmPeripheral;
 use crate::{
     config::LegRuntimeConfig,
     quadrature::{QuadratureDirection, QuadratureEvent},
+    units::{CountDelta, abs_position_delta, position_delta},
 };
 
 use super::{
@@ -21,14 +22,23 @@ pub enum LegError {
     MoveTimeout,
 }
 
+fn available_steps(end_position: i32, start_position: i32) -> u32 {
+    let delta = position_delta(end_position, start_position);
+    if delta <= 0 { 0 } else { delta as u32 }
+}
+
+fn motion_steps_i32(steps: u32) -> i32 {
+    steps as i32
+}
+
 impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
     async fn move_up_steps(
         &mut self,
         expected_direction: QuadratureDirection,
-        steps: u16,
+        steps: CountDelta,
         runtime_config: LegRuntimeConfig,
     ) {
-        if steps == 0 {
+        if steps.get() == 0 {
             return;
         }
 
@@ -38,18 +48,20 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
 
         self.apply_drive_mode(DriveMode::UpBoost, runtime_config);
 
-        let startup_steps = steps.min(runtime_config.startup_events().get());
+        let target_steps = steps.get_i32();
+        let startup_steps =
+            motion_steps_i32(steps.get().min(runtime_config.startup_events().get()));
         let start_position = self.encoder_position();
 
         while travel_in_direction(start_position, self.encoder_position(), expected_direction)
-            < startup_steps as i32
+            < startup_steps
         {
             let event = self
                 .quadrature_watcher
                 .wait_for_direction(expected_direction)
                 .await;
             if travel_in_direction(start_position, event.snapshot.position, expected_direction)
-                >= startup_steps as i32
+                >= startup_steps
             {
                 break;
             }
@@ -58,14 +70,14 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
         self.apply_drive_mode(DriveMode::UpRun, runtime_config);
 
         while travel_in_direction(start_position, self.encoder_position(), expected_direction)
-            < steps as i32
+            < target_steps
         {
             let event = self
                 .quadrature_watcher
                 .wait_for_direction(expected_direction)
                 .await;
             if travel_in_direction(start_position, event.snapshot.position, expected_direction)
-                >= steps as i32
+                >= target_steps
             {
                 break;
             }
@@ -136,7 +148,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
         self.apply_drive_mode(DriveMode::Stop, runtime_config);
         self.move_up_steps(
             up_direction,
-            runtime_config.homing_backoff_steps().get(),
+            runtime_config.homing_backoff_steps(),
             runtime_config,
         )
         .await;
@@ -222,24 +234,25 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
     async fn move_steps(
         &mut self,
         direction: QuadratureDirection,
-        steps: u16,
+        steps: CountDelta,
     ) -> Result<(), LegError> {
         let runtime_config = self.runtime_config_reader.current().leg();
         let allowed_steps = if direction == self.state.up_direction {
-            (self.state.max_position - self.logical_position()).max(0) as u16
+            available_steps(self.state.max_position, self.logical_position())
         } else if direction == self.state.down_direction {
-            (self.logical_position() - self.state.min_position).max(0) as u16
+            available_steps(self.logical_position(), self.state.min_position)
         } else {
             0
         };
-        let steps = steps.min(allowed_steps);
+        let steps = steps.get().min(allowed_steps);
+        let target_steps = motion_steps_i32(steps);
 
-        if steps == 0 {
+        if target_steps == 0 {
             self.stop();
             return Ok(());
         }
 
-        let startup_steps = steps.min(runtime_config.startup_events().get());
+        let startup_steps = motion_steps_i32(steps.min(runtime_config.startup_events().get()));
         let start_position = self.encoder_position();
 
         if direction == self.state.up_direction {
@@ -252,13 +265,13 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         }
 
         while travel_in_direction(start_position, self.encoder_position(), direction)
-            < startup_steps as i32
+            < startup_steps
         {
             let event = self
                 .wait_for_progress(direction, runtime_config.move_stall_timeout())
                 .await?;
             if travel_in_direction(start_position, event.snapshot.position, direction)
-                >= startup_steps as i32
+                >= startup_steps
             {
                 break;
             }
@@ -272,13 +285,13 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
             self.apply_drive_mode(DriveMode::DownRun, runtime_config);
         }
 
-        while travel_in_direction(start_position, self.encoder_position(), direction) < steps as i32
+        while travel_in_direction(start_position, self.encoder_position(), direction) < target_steps
         {
             let event = self
                 .wait_for_progress(direction, runtime_config.move_stall_timeout())
                 .await?;
             if travel_in_direction(start_position, event.snapshot.position, direction)
-                >= steps as i32
+                >= target_steps
             {
                 break;
             }
@@ -288,11 +301,11 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         Ok(())
     }
 
-    pub async fn move_up_step(&mut self, steps: u16) -> Result<(), LegError> {
+    pub async fn move_up_step(&mut self, steps: CountDelta) -> Result<(), LegError> {
         self.move_steps(self.state.up_direction, steps).await
     }
 
-    pub async fn move_down_step(&mut self, steps: u16) -> Result<(), LegError> {
+    pub async fn move_down_step(&mut self, steps: CountDelta) -> Result<(), LegError> {
         self.move_steps(self.state.down_direction, steps).await
     }
 
@@ -302,7 +315,8 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         let target_position = self.clamp_target(target_position);
         let current_position = self.logical_position();
 
-        if (target_position - current_position).abs() <= runtime_config.target_tolerance().get_i32()
+        if abs_position_delta(target_position, current_position)
+            <= runtime_config.target_tolerance().get_i32()
         {
             self.stop();
             return Ok(());
@@ -315,8 +329,10 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                 let event = self
                     .wait_for_progress(self.state.up_direction, runtime_config.move_stall_timeout())
                     .await?;
-                let error =
-                    target_position - self.logical_position_from_raw(event.snapshot.position);
+                let error = position_delta(
+                    target_position,
+                    self.logical_position_from_raw(event.snapshot.position),
+                );
 
                 if error <= runtime_config.target_tolerance().get_i32() {
                     self.stop();
@@ -340,8 +356,10 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
                         runtime_config.move_stall_timeout(),
                     )
                     .await?;
-                let error =
-                    self.logical_position_from_raw(event.snapshot.position) - target_position;
+                let error = position_delta(
+                    self.logical_position_from_raw(event.snapshot.position),
+                    target_position,
+                );
 
                 if error <= runtime_config.target_tolerance().get_i32() {
                     self.stop();

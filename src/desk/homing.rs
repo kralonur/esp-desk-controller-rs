@@ -1,11 +1,14 @@
 use embassy_time::{Instant, Timer};
 use esp_hal::mcpwm::PwmPeripheral;
 
-use crate::leg::{DriveMode, LegError};
+use crate::{
+    leg::{DriveMode, LegError},
+    units::{abs_position_delta, position_delta},
+};
 
 use super::{
     planning::{LegPlan, SyncPhase, apply_dual_plan, next_sync_phase, plan_homing_down},
-    position::{abs_position_delta, position_delta, progressed_in_direction, travel_in_direction},
+    position::{progressed_in_direction, travel_in_direction},
     state::{Desk, DeskError, ManagedLeg, ReadyDesk, UnhomedDesk},
     status::{DeskMotionState, DeskStopReason},
 };

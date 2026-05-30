@@ -8,9 +8,10 @@ use embassy_sync::{
 };
 use static_cell::StaticCell;
 
-use crate::leg::LegStatus;
-
-use super::position::{abs_position_delta, average_position};
+use crate::{
+    leg::LegStatus,
+    units::{abs_position_delta, average_position},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 pub enum DeskMotionState {

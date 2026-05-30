@@ -7,6 +7,38 @@ use defmt::Format;
 
 pub const PWM_TIMER_MAX_TICKS: u16 = 99;
 
+pub const fn saturating_i32_from_i64(value: i64) -> i32 {
+    if value > i32::MAX as i64 {
+        i32::MAX
+    } else if value < i32::MIN as i64 {
+        i32::MIN
+    } else {
+        value as i32
+    }
+}
+
+pub const fn position_delta(end_position: i32, start_position: i32) -> i32 {
+    saturating_i32_from_i64(end_position as i64 - start_position as i64)
+}
+
+pub const fn positive_position_delta(end_position: i32, start_position: i32) -> i32 {
+    let delta = position_delta(end_position, start_position);
+    if delta < 0 { 0 } else { delta }
+}
+
+pub const fn abs_position_delta(left_position: i32, right_position: i32) -> i32 {
+    let delta = left_position as i64 - right_position as i64;
+    if delta == i64::MIN {
+        i32::MAX
+    } else {
+        saturating_i32_from_i64(if delta < 0 { -delta } else { delta })
+    }
+}
+
+pub const fn average_position(left_position: i32, right_position: i32) -> i32 {
+    ((left_position as i64 + right_position as i64) / 2) as i32
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Format)]
 pub struct PositionCounts(i32);
 
@@ -48,13 +80,25 @@ impl RelativeCounts {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Format)]
-pub struct CountDelta(u16);
+pub struct CountDelta(u32);
 
 impl CountDelta {
-    pub const fn new(value: u16) -> Self {
+    pub const MAX: u32 = i32::MAX as u32;
+
+    pub const fn new(value: u32) -> Self {
+        assert!(value <= Self::MAX, "count delta must fit in i32");
         Self(value)
     }
-    pub const fn get(self) -> u16 {
+
+    pub const fn try_new(value: u32) -> Option<Self> {
+        if value <= Self::MAX {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    pub const fn get(self) -> u32 {
         self.0
     }
 
