@@ -76,6 +76,8 @@ pub(super) fn next_sync_phase(
     current: SyncPhase,
     effective_skew_abs: i32,
 ) -> SyncPhase {
+    // Sync uses hysteresis: enter thresholds are higher than exit thresholds so
+    // encoder noise near a boundary does not make the two legs chatter.
     match current {
         SyncPhase::Balanced => {
             if effective_skew_abs >= config.catch_up_enter_counts().get_i32() {
@@ -97,6 +99,8 @@ pub(super) fn next_sync_phase(
         }
         SyncPhase::PauseLead => {
             if effective_skew_abs <= config.catch_up_exit_counts().get_i32() {
+                // Leaving catch-up can still require speed matching if skew is
+                // below the pause threshold but above the speed-match threshold.
                 if effective_skew_abs >= config.sync_speedup_enter_counts().get_i32() {
                     SyncPhase::SpeedMatch
                 } else {

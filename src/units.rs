@@ -7,6 +7,7 @@ use defmt::Format;
 
 pub const PWM_TIMER_MAX_TICKS: u16 = 99;
 
+/// Clamp a widened encoder calculation back into the signed count range.
 pub const fn saturating_i32_from_i64(value: i64) -> i32 {
     if value > i32::MAX as i64 {
         i32::MAX
@@ -17,15 +18,18 @@ pub const fn saturating_i32_from_i64(value: i64) -> i32 {
     }
 }
 
+/// Signed distance between two encoder positions, saturated on overflow.
 pub const fn position_delta(end_position: i32, start_position: i32) -> i32 {
     saturating_i32_from_i64(end_position as i64 - start_position as i64)
 }
 
+/// Forward-only distance; movement opposite to the expected direction is zero.
 pub const fn positive_position_delta(end_position: i32, start_position: i32) -> i32 {
     let delta = position_delta(end_position, start_position);
     if delta < 0 { 0 } else { delta }
 }
 
+/// Absolute encoder distance, saturated so `i32::MIN` cannot overflow.
 pub const fn abs_position_delta(left_position: i32, right_position: i32) -> i32 {
     let delta = left_position as i64 - right_position as i64;
     if delta == i64::MIN {
@@ -80,9 +84,14 @@ impl RelativeCounts {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Format)]
+/// Non-negative encoder count distance.
+///
+/// Stored as `u32`, but capped at `i32::MAX` because motion code compares
+/// thresholds against signed encoder deltas.
 pub struct CountDelta(u32);
 
 impl CountDelta {
+    /// Largest count delta that can be safely converted to signed motion math.
     pub const MAX: u32 = i32::MAX as u32;
 
     pub const fn new(value: u32) -> Self {
@@ -118,6 +127,7 @@ impl DutyPercent {
         Self(value)
     }
 
+    /// Convert arbitrary signed trim math into the legal 0..=100 duty range.
     pub const fn from_clamped_i32(value: i32) -> Self {
         let clamped = if value < 0 {
             0
@@ -137,6 +147,7 @@ impl DutyPercent {
         self.0 as u16
     }
 
+    /// Scale percentage duty to a PWM timestamp with nearest-integer rounding.
     pub const fn to_pwm_timestamp(self, max_timestamp: u16) -> u16 {
         let scaled = self.0 as u32 * max_timestamp as u32 + 50;
         (scaled / 100) as u16

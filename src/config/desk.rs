@@ -46,6 +46,9 @@ pub enum ObstructionSensitivity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Thresholds used by obstruction detection.
+///
+/// `minimum_baseline_percent` is compared against the best observed movement
+/// speed, and `consecutive_windows` controls how long the slowdown must persist.
 pub struct ObstructionProfileConfig {
     minimum_baseline_percent: Percent,
     consecutive_windows: u8,
@@ -55,7 +58,8 @@ pub struct ObstructionProfileConfig {
 /// Runtime settings for coordinated desk behavior.
 ///
 /// Validation keeps the move timeout longer than the obstruction detection
-/// window and requires nonzero movement timeouts/intervals.
+/// window and requires nonzero movement timeouts/intervals. Setters are
+/// transactional: rejected values leave the previous config unchanged.
 pub struct DeskConfig {
     target_tolerance: CountDelta,
     target_slow_zone: CountDelta,
@@ -123,6 +127,7 @@ impl DeskConfig {
         config
     }
 
+    /// Validate desk-only invariants before this config is installed or stored.
     pub const fn validate(self) -> Result<Self, ConfigError> {
         if self.is_valid() {
             Ok(self)
@@ -285,6 +290,7 @@ impl DeskConfig {
         self.obstruction_sensitivity
     }
 
+    /// Return the active obstruction profile, or `None` when detection is off.
     pub const fn obstruction_profile(
         self,
         sensitivity: ObstructionSensitivity,
@@ -461,6 +467,7 @@ impl Default for DeskConfig {
 }
 
 impl ObstructionProfileConfig {
+    /// Build an obstruction profile that requires at least one slow window.
     pub const fn new(minimum_baseline_percent: Percent, consecutive_windows: u8) -> Self {
         assert!(
             consecutive_windows > 0,

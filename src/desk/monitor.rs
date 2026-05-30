@@ -87,11 +87,15 @@ impl MoveProgressMonitor {
         .max(0);
         self.max_forward_travel = self.max_forward_travel.max(forward_travel);
 
+        // Ignore early samples until normal startup movement has had room to
+        // overcome encoder jitter and mechanical slack.
         if self.max_forward_travel < self.warmup_counts {
             self.consecutive_wrong_way_samples = 0;
             return None;
         }
 
+        // Compare against the best forward progress, not the start point, so a
+        // retreat after valid movement is caught in either travel direction.
         let moved_wrong_way =
             self.max_forward_travel.saturating_sub(forward_travel) >= self.retreat_counts;
 
@@ -147,6 +151,8 @@ impl MoveSnapshot {
     }
 
     pub(super) fn suspends_obstruction_detection(self, phase: SyncPhase) -> bool {
+        // Sync correction and near-target slowing intentionally reduce speed,
+        // so obstruction windows collected there would look like false stalls.
         !matches!(phase, SyncPhase::Balanced) || self.left.near_target || self.right.near_target
     }
 }
@@ -254,6 +260,8 @@ impl ObstructionMonitor {
         }
 
         if !self.warmed_up {
+            // Require both elapsed time and per-leg travel before learning the
+            // baseline so startup acceleration is not treated as normal speed.
             let warmed_up = now.saturating_duration_since(self.move_started_at)
                 >= self.config.obstruction_warmup_duration()
                 && self.max_left_travel >= self.config.obstruction_warmup_counts().get_i32()
@@ -281,6 +289,8 @@ impl ObstructionMonitor {
         let window_travel = total_travel.saturating_sub(self.window_start_total_travel);
         let window_speed = (window_travel as u32).saturating_mul(1_000) / elapsed_ms as u32;
 
+        // Baseline is the best observed speed for this move; obstruction is a
+        // sustained drop below the configured fraction of that baseline.
         if self.baseline_speed == 0 || window_speed >= self.baseline_speed {
             self.baseline_speed = window_speed;
             self.consecutive_slow_windows = 0;

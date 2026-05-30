@@ -6,7 +6,10 @@ use static_cell::StaticCell;
 use crate::config::{ConfigError, DeskConfig, LegRuntimeConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Complete runtime configuration snapshot.
+/// Complete validated runtime configuration snapshot.
+///
+/// Desk and leg settings are validated together because several desk-level
+/// thresholds and duties must fit inside leg-level limits.
 pub struct RuntimeConfig {
     desk: DeskConfig,
     leg: LegRuntimeConfig,
@@ -20,13 +23,16 @@ pub struct RuntimeConfigStorage {
 /// Shared in-memory runtime configuration.
 ///
 /// Updates are validated before being installed so readers never observe an
-/// invalid config snapshot.
+/// invalid config snapshot. Failed updates leave the previous snapshot active.
 pub struct RuntimeConfigState {
     config: Mutex<CriticalSectionRawMutex, Cell<RuntimeConfig>>,
 }
 
 #[derive(Clone, Copy)]
 /// Cheap copyable reader for the current runtime configuration.
+///
+/// Each read returns a full snapshot, so callers do not hold the config lock
+/// while running movement loops.
 pub struct RuntimeConfigReader {
     state: &'static RuntimeConfigState,
 }
@@ -39,6 +45,7 @@ impl RuntimeConfig {
         }
     }
 
+    /// Validate desk, leg, and cross-field invariants for this snapshot.
     pub const fn validate(self) -> Result<Self, ConfigError> {
         match self.desk.validate() {
             Ok(_) => match self.leg.validate() {
@@ -89,6 +96,7 @@ impl RuntimeConfig {
             && self.desk.homing_fault_skew_counts().get() <= max_position
     }
 
+    /// Build a snapshot from component configs after cross-validation.
     pub const fn from_parts(desk: DeskConfig, leg: LegRuntimeConfig) -> Result<Self, ConfigError> {
         Self { desk, leg }.validate()
     }
@@ -101,7 +109,7 @@ impl RuntimeConfig {
         self.leg
     }
 
-    /// Mutate desk config transactionally, reverting if validation fails.
+    /// Mutate desk config transactionally, reverting if full validation fails.
     pub fn update_desk(
         &mut self,
         update_fn: impl FnOnce(&mut DeskConfig) -> Result<(), &'static str>,
@@ -116,7 +124,7 @@ impl RuntimeConfig {
         }
     }
 
-    /// Mutate leg config transactionally, reverting if validation fails.
+    /// Mutate leg config transactionally, reverting if full validation fails.
     pub fn update_leg(
         &mut self,
         update_fn: impl FnOnce(&mut LegRuntimeConfig) -> Result<(), &'static str>,
@@ -151,6 +159,7 @@ impl RuntimeConfigStorage {
         }
     }
 
+    /// Initialize global runtime config storage with a validated snapshot.
     pub fn init(&'static self, initial_config: RuntimeConfig) -> &'static RuntimeConfigState {
         assert!(initial_config.validate().is_ok(), "invalid runtime config");
         self.state.init(RuntimeConfigState::new(initial_config))
@@ -164,10 +173,12 @@ impl RuntimeConfigState {
         }
     }
 
+    /// Create a copyable reader for consumers that only need snapshots.
     pub fn reader(&'static self) -> RuntimeConfigReader {
         RuntimeConfigReader { state: self }
     }
 
+    /// Return the currently active validated snapshot.
     pub fn current(&self) -> RuntimeConfig {
         self.config.lock(|config| config.get())
     }
@@ -182,7 +193,7 @@ impl RuntimeConfigState {
         }))
     }
 
-    /// Mutate the active config in place if the resulting snapshot validates.
+    /// Mutate the active config in place only if the resulting snapshot validates.
     pub fn update(
         &self,
         update_fn: impl FnOnce(&mut RuntimeConfig),
@@ -202,6 +213,7 @@ impl RuntimeConfigState {
 }
 
 impl RuntimeConfigReader {
+    /// Return the current snapshot through this reader.
     pub fn current(self) -> RuntimeConfig {
         self.state.current()
     }

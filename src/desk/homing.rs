@@ -69,6 +69,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
 
         let initial_left_position = left_leg.logical_encoder_position();
         let initial_right_position = right_leg.logical_encoder_position();
+        // If the legs start uneven, lower only the leading leg until the pair
+        // is close enough to enter synchronized homing.
         if position_delta(initial_left_position, initial_right_position) > alignment_tolerance {
             right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
             left_leg.apply_drive_mode(DriveMode::HomeDown, leg_config);
@@ -177,6 +179,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         let mut left_started = false;
         let mut right_started = false;
 
+        // Confirm both encoders move downward before relying on stall timing;
+        // upward progress here means the configured polarity is wrong.
         loop {
             if stop_requested() {
                 left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
@@ -236,6 +240,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         left_leg.apply_drive_mode(DriveMode::HomeDown, leg_config);
         right_leg.apply_drive_mode(DriveMode::HomeDown, leg_config);
 
+        // Drive both legs down until each stops making progress, while keeping
+        // skew bounded so one side cannot keep moving far after the other stalls.
         let mut left_last_position = left_leg.encoder_position();
         let mut right_last_position = right_leg.encoder_position();
         let mut left_last_progress = Instant::now();
@@ -325,6 +331,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         left_leg.apply_drive_mode(DriveMode::UpBoost, leg_config);
         right_leg.apply_drive_mode(DriveMode::UpBoost, leg_config);
 
+        // Lift both legs off the lower end stop before zeroing the coordinate
+        // frame; this avoids treating a loaded hard stop as the ready position.
         while !left_backoff_done || !right_backoff_done {
             if stop_requested() {
                 left_leg.apply_drive_mode(DriveMode::Stop, leg_config);

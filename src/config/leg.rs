@@ -22,7 +22,8 @@ const DEFAULT_LEG_TARGET_TOLERANCE: CountDelta = CountDelta::new(5);
 /// Runtime settings for individual leg movement and homing.
 ///
 /// Validation keeps travel limits sane and rejects zero movement
-/// timeouts/intervals.
+/// timeouts/intervals. Setters are transactional: rejected values leave the
+/// previous config unchanged.
 pub struct LegRuntimeConfig {
     startup_duty: DutyPercent,
     max_duty: DutyPercent,
@@ -62,6 +63,7 @@ impl LegRuntimeConfig {
         config
     }
 
+    /// Validate leg-only invariants before this config is installed or stored.
     pub const fn validate(self) -> Result<Self, ConfigError> {
         if self.is_valid() {
             Ok(self)
