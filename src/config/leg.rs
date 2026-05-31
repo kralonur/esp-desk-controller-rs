@@ -3,19 +3,33 @@ use embassy_time::Duration;
 use crate::config::ConfigError;
 use crate::units::{CountDelta, DutyPercent, PositionCounts};
 
+// Initial one-leg duty, in percent, used for the startup boost phase.
 const DEFAULT_LEG_STARTUP_DUTY: DutyPercent = DutyPercent::new(100);
+// Hard cap, in percent, applied to every duty requested by one-leg control.
 const DEFAULT_LEG_MAX_DUTY: DutyPercent = DutyPercent::new(100);
+// Normal one-leg movement duty, in percent, after startup boost ends.
 const DEFAULT_LEG_RUN_DUTY: DutyPercent = DutyPercent::new(30);
+// Reduced one-leg duty, in percent, used inside the target slow zone.
 const DEFAULT_LEG_SLOW_DUTY: DutyPercent = DutyPercent::new(15);
+// One-leg downward homing duty, in percent, used while searching for the end stop.
 const DEFAULT_LEG_HOMING_DUTY: DutyPercent = DutyPercent::new(20);
+// Encoder-count travel before one-leg control leaves startup boost.
 const DEFAULT_LEG_STARTUP_EVENTS: CountDelta = CountDelta::new(8);
+// Maximum time for a homing leg to show initial movement before faulting.
 const DEFAULT_LEG_HOMING_START_TIMEOUT: Duration = Duration::from_millis(800);
+// Maximum time without encoder progress before one-leg homing treats the leg as stalled.
 const DEFAULT_LEG_HOMING_STALL_TIMEOUT: Duration = Duration::from_millis(600);
+// Sleep interval for one-leg homing and manual override progress checks.
 const DEFAULT_LEG_HOMING_POLL_INTERVAL: Duration = Duration::from_millis(20);
+// Encoder-count lift after hitting the lower end stop before declaring zero.
 const DEFAULT_LEG_HOMING_BACKOFF_STEPS: CountDelta = CountDelta::new(20);
+// Default logical travel range, in encoder counts, after homing.
 const DEFAULT_LEG_MAX_POSITION: PositionCounts = PositionCounts::new(2_000);
+// Maximum time without encoder progress during one-leg ready movement.
 const DEFAULT_LEG_MOVE_STALL_TIMEOUT: Duration = Duration::from_millis(600);
+// Encoder-count distance from target where one-leg movement switches to slow duty.
 const DEFAULT_LEG_TARGET_SLOW_ZONE: CountDelta = CountDelta::new(10);
+// Encoder-count error band accepted as reached for one-leg movement.
 const DEFAULT_LEG_TARGET_TOLERANCE: CountDelta = CountDelta::new(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,19 +39,33 @@ const DEFAULT_LEG_TARGET_TOLERANCE: CountDelta = CountDelta::new(5);
 /// timeouts/intervals. Setters are transactional: rejected values leave the
 /// previous config unchanged.
 pub struct LegRuntimeConfig {
+    // MQTT `leg/startup_duty`: startup boost duty for individual-leg control, in percent.
     startup_duty: DutyPercent,
+    // MQTT `leg/max_duty`: maximum allowed individual-leg duty, in percent.
     max_duty: DutyPercent,
+    // MQTT `leg/run_duty`: normal individual-leg movement duty, in percent.
     run_duty: DutyPercent,
+    // MQTT `leg/slow_duty`: individual-leg duty inside the target slow zone, in percent.
     slow_duty: DutyPercent,
+    // MQTT `leg/homing_duty`: individual-leg downward homing duty, in percent.
     homing_duty: DutyPercent,
+    // MQTT `leg/startup_events`: encoder counts to stay in startup boost.
     startup_events: CountDelta,
+    // MQTT `leg/homing_start_timeout_ms`: initial homing movement timeout, in milliseconds.
     homing_start_timeout: Duration,
+    // MQTT `leg/homing_stall_timeout_ms`: no-progress homing stall timeout, in milliseconds.
     homing_stall_timeout: Duration,
+    // MQTT `leg/homing_poll_interval_ms`: individual-leg homing/override poll interval, in milliseconds.
     homing_poll_interval: Duration,
+    // MQTT `leg/homing_backoff_steps`: encoder counts to back off after homing stall.
     homing_backoff_steps: CountDelta,
+    // MQTT `leg/default_max_position`: logical travel limit after homing, in encoder counts.
     default_max_position: PositionCounts,
+    // MQTT `leg/move_stall_timeout_ms`: individual-leg ready-move no-progress timeout.
     move_stall_timeout: Duration,
+    // MQTT `leg/target_slow_zone`: distance from target where individual-leg moves slow down.
     target_slow_zone: CountDelta,
+    // MQTT `leg/target_tolerance`: acceptable individual-leg target error, in encoder counts.
     target_tolerance: CountDelta,
 }
 

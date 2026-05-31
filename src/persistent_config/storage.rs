@@ -12,12 +12,16 @@ use crate::persistent_config::{
 // ESP-IDF's built-in "Single factory app, no OTA" partition table places the NVS partition at
 // 0x9000 with size 0x6000:
 // https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-guides/partition-tables.html#built-in-partition-tables
+// Flash offset of the NVS partition used for persisted runtime configuration.
 const NVS_PARTITION_OFFSET: usize = 0x9000;
+// Flash size of the NVS partition used for persisted runtime configuration.
 const NVS_PARTITION_SIZE: usize = 0x6000;
 
 // ESP-IDF NVS keys are limited to 15 characters. Keep these short and ASCII-compatible.
 // https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/storage/nvs_flash.html#keys-and-values
+// NVS namespace that contains this firmware's persisted runtime config.
 const CONFIG_NAMESPACE: Key = Key::from_array(b"deskcfg");
+// NVS key for the encoded runtime config blob inside `CONFIG_NAMESPACE`.
 const CONFIG_KEY: Key = Key::from_array(b"runtime");
 
 type ConfigNvs = Nvs<FlashStorage<'static>>;

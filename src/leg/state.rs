@@ -25,7 +25,9 @@ pub struct Unhomed;
 /// `up_drive` selects which motor side raises the leg, while `up_direction`
 /// records which quadrature direction corresponds to upward travel.
 pub struct LegConfig {
+    /// Motor drive side that physically raises this leg.
     pub up_drive: DriveSide,
+    /// Encoder direction observed while this leg moves upward.
     pub up_direction: QuadratureDirection,
 }
 

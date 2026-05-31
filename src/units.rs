@@ -5,6 +5,7 @@
 
 use defmt::Format;
 
+/// Shared MCPWM period used for 1% duty resolution: 99 ticks gives 100 duty slots.
 pub const PWM_TIMER_MAX_TICKS: u16 = 99;
 
 /// Clamp a widened encoder calculation back into the signed count range.

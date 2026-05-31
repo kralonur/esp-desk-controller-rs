@@ -3,44 +3,76 @@ use embassy_time::Duration;
 use crate::config::ConfigError;
 use crate::units::{CountDelta, DutyPercent, DutyPercentTrim, Percent};
 
+// Encoder-count error band accepted as reached for coordinated desk moves.
 const DEFAULT_DESK_TARGET_TOLERANCE: CountDelta = CountDelta::new(5);
+// Encoder-count distance from target where coordinated movement switches to slow duty.
 const DEFAULT_DESK_TARGET_SLOW_ZONE: CountDelta = CountDelta::new(10);
+// Maximum total time allowed for a coordinated move or homing backoff step.
 const DEFAULT_DESK_MOVE_TIMEOUT: Duration = Duration::from_millis(1_200);
+// Time window used to calculate obstruction speed, in milliseconds.
 const DEFAULT_OBSTRUCTION_SAMPLE_WINDOW: Duration = Duration::from_millis(150);
+// Startup period ignored by obstruction detection while the desk accelerates.
 const DEFAULT_OBSTRUCTION_WARMUP_DURATION: Duration = Duration::from_millis(300);
+// Minimum encoder-count travel before obstruction detection can establish a baseline.
 const DEFAULT_OBSTRUCTION_WARMUP_COUNTS: CountDelta = CountDelta::new(8);
+// Lowest duty, in percent, allowed during coordinated motion after sync trimming.
 const DEFAULT_MIN_MOVE_DUTY: DutyPercent = DutyPercent::new(15);
+// Normal coordinated movement duty, in percent.
 const DEFAULT_MOVE_RUN_DUTY: DutyPercent = DutyPercent::new(30);
+// Reduced coordinated movement duty, in percent, used inside the target slow zone.
 const DEFAULT_MOVE_SLOW_DUTY: DutyPercent = DutyPercent::new(17);
+// Duty-percent adjustment applied when legs are slightly out of sync during movement.
 const DEFAULT_MOVE_SYNC_DUTY_STEP: DutyPercentTrim = DutyPercentTrim::new(8);
+// Sleep interval for coordinated homing progress and skew checks.
 const DEFAULT_DESK_HOMING_POLL_INTERVAL: Duration = Duration::from_millis(20);
+// Maximum time for both legs to show initial downward homing movement.
 const DEFAULT_DESK_HOMING_START_TIMEOUT: Duration = Duration::from_millis(800);
+// Maximum time without encoder progress before coordinated homing treats a leg as stalled.
 const DEFAULT_DESK_HOMING_STALL_TIMEOUT: Duration = Duration::from_millis(600);
+// Encoder-count lift after coordinated homing hits the lower end stop.
 const DEFAULT_DESK_HOMING_BACKOFF_STEPS: CountDelta = CountDelta::new(20);
+// Coordinated downward homing duty, in percent, after startup boost ends.
 const DEFAULT_HOMING_RUN_DUTY: DutyPercent = DutyPercent::new(20);
+// Duty-percent adjustment applied when legs are slightly out of sync during homing.
 const DEFAULT_HOMING_SYNC_DUTY_STEP: DutyPercentTrim = DutyPercentTrim::new(4);
+// Skew, in encoder counts, where light sync correction starts.
 const DEFAULT_SYNC_SPEEDUP_ENTER_COUNTS: CountDelta = CountDelta::new(10);
+// Skew, in encoder counts, where light sync correction stops.
 const DEFAULT_SYNC_SPEEDUP_EXIT_COUNTS: CountDelta = CountDelta::new(4);
+// Skew, in encoder counts, where stronger catch-up correction starts.
 const DEFAULT_CATCH_UP_ENTER_COUNTS: CountDelta = CountDelta::new(30);
+// Skew, in encoder counts, where stronger catch-up correction stops.
 const DEFAULT_CATCH_UP_EXIT_COUNTS: CountDelta = CountDelta::new(12);
+// Ready-move skew, in encoder counts, that faults the desk for unsafe mismatch.
 const DEFAULT_FAULT_SKEW_COUNTS: CountDelta = CountDelta::new(80);
+// Homing skew, in encoder counts, that faults the desk for unsafe mismatch.
 const DEFAULT_HOMING_FAULT_SKEW_COUNTS: CountDelta = CountDelta::new(160);
+// Default obstruction profile selected at boot before persisted config is loaded.
 const DEFAULT_OBSTRUCTION_SENSITIVITY: ObstructionSensitivity = ObstructionSensitivity::High;
+// Low sensitivity obstruction threshold: speed may fall to 55 percent for 3 windows.
 const DEFAULT_LOW_OBSTRUCTION_PROFILE: ObstructionProfileConfig =
     ObstructionProfileConfig::new(Percent::new(55), 3);
+// Medium sensitivity obstruction threshold: speed may fall to 70 percent for 2 windows.
 const DEFAULT_MEDIUM_OBSTRUCTION_PROFILE: ObstructionProfileConfig =
     ObstructionProfileConfig::new(Percent::new(70), 2);
+// High sensitivity obstruction threshold: speed may fall to 80 percent for 2 windows.
 const DEFAULT_HIGH_OBSTRUCTION_PROFILE: ObstructionProfileConfig =
     ObstructionProfileConfig::new(Percent::new(80), 2);
+// How long manual override access remains unlocked without a command.
 const DEFAULT_OVERRIDE_UNLOCK_TIMEOUT: Duration = Duration::from_millis(120_000);
+// Minimum interval between MQTT status publishes during normal operation.
 const DEFAULT_MQTT_STATUS_PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
 /// Obstruction detection profile selected for coordinated desk movement.
 pub enum ObstructionSensitivity {
+    /// Disable obstruction detection for coordinated movement.
     None,
+    /// Use the least sensitive obstruction profile.
     Low,
+    /// Use the middle obstruction profile.
     Medium,
+    /// Use the most sensitive obstruction profile.
     High,
 }
 
@@ -50,7 +82,9 @@ pub enum ObstructionSensitivity {
 /// `minimum_baseline_percent` is compared against the best observed movement
 /// speed, and `consecutive_windows` controls how long the slowdown must persist.
 pub struct ObstructionProfileConfig {
+    // Minimum allowed speed as a percent of the best observed speed during the move.
     minimum_baseline_percent: Percent,
+    // Number of consecutive slow sample windows required before obstruction faults.
     consecutive_windows: u8,
 }
 
@@ -61,33 +95,61 @@ pub struct ObstructionProfileConfig {
 /// window and requires nonzero movement timeouts/intervals. Setters are
 /// transactional: rejected values leave the previous config unchanged.
 pub struct DeskConfig {
+    // MQTT `desk/target_tolerance`: acceptable coordinated target error, in encoder counts.
     target_tolerance: CountDelta,
+    // MQTT `desk/target_slow_zone`: distance from target where coordinated moves slow down.
     target_slow_zone: CountDelta,
+    // MQTT `desk/move_timeout_ms`: coordinated move/backoff no-progress timeout, in milliseconds.
     move_timeout: Duration,
+    // MQTT `desk/obstruction_sample_window_ms`: obstruction speed sample window, in milliseconds.
     obstruction_sample_window: Duration,
+    // MQTT `desk/obstruction_warmup_duration_ms`: startup time ignored by obstruction detection.
     obstruction_warmup_duration: Duration,
+    // MQTT `desk/obstruction_warmup_counts`: startup travel ignored by obstruction detection.
     obstruction_warmup_counts: CountDelta,
+    // MQTT `desk/min_move_duty`: minimum coordinated movement duty after sync trimming, in percent.
     min_move_duty: DutyPercent,
+    // MQTT `desk/move_run_duty`: normal coordinated movement duty, in percent.
     move_run_duty: DutyPercent,
+    // MQTT `desk/move_slow_duty`: coordinated movement duty inside the slow zone, in percent.
     move_slow_duty: DutyPercent,
+    // MQTT `desk/move_sync_duty_step`: duty-percent trim used for movement sync correction.
     move_sync_duty_step: DutyPercentTrim,
+    // MQTT `desk/homing_poll_interval_ms`: coordinated homing poll interval, in milliseconds.
     homing_poll_interval: Duration,
+    // MQTT `desk/homing_start_timeout_ms`: initial coordinated homing movement timeout.
     homing_start_timeout: Duration,
+    // MQTT `desk/homing_stall_timeout_ms`: coordinated homing no-progress stall timeout.
     homing_stall_timeout: Duration,
+    // MQTT `desk/homing_backoff_steps`: encoder counts to lift after coordinated homing.
     homing_backoff_steps: CountDelta,
+    // MQTT `desk/homing_run_duty`: coordinated homing duty after startup boost, in percent.
     homing_run_duty: DutyPercent,
+    // MQTT `desk/homing_sync_duty_step`: duty-percent trim used for homing sync correction.
     homing_sync_duty_step: DutyPercentTrim,
+    // MQTT `desk/sync_speedup_enter_counts`: skew where light sync correction starts.
     sync_speedup_enter_counts: CountDelta,
+    // MQTT `desk/sync_speedup_exit_counts`: skew where light sync correction stops.
     sync_speedup_exit_counts: CountDelta,
+    // MQTT `desk/catch_up_enter_counts`: skew where stronger catch-up correction starts.
     catch_up_enter_counts: CountDelta,
+    // MQTT `desk/catch_up_exit_counts`: skew where stronger catch-up correction stops.
     catch_up_exit_counts: CountDelta,
+    // MQTT `desk/fault_skew_counts`: ready-move skew that faults the desk.
     fault_skew_counts: CountDelta,
+    // MQTT `desk/homing_fault_skew_counts`: homing skew that faults the desk.
     homing_fault_skew_counts: CountDelta,
+    // MQTT `desk/obstruction_sensitivity`: selected obstruction profile name.
     obstruction_sensitivity: ObstructionSensitivity,
+    // MQTT `desk/low_obstruction_min_percent` and `desk/low_obstruction_windows`.
     low_obstruction_profile: ObstructionProfileConfig,
+    // MQTT `desk/medium_obstruction_min_percent` and `desk/medium_obstruction_windows`.
     medium_obstruction_profile: ObstructionProfileConfig,
+    // MQTT `desk/high_obstruction_min_percent` and `desk/high_obstruction_windows`.
     high_obstruction_profile: ObstructionProfileConfig,
+    // MQTT `desk/override_unlock_timeout_ms`: manual override idle timeout, in milliseconds.
     override_unlock_timeout: Duration,
+    // MQTT `desk/mqtt_status_publish_interval_ms`: minimum status publish interval.
     mqtt_status_publish_interval: Duration,
 }
 

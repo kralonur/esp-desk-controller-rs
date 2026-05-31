@@ -39,7 +39,9 @@ use crate::{
 
 mod control;
 
+// MCPWM timer period. With `PWM_TIMER_MAX_TICKS = 99`, duty commands map cleanly to 0..=100%.
 const PWM_PERIOD_TICKS: u16 = PWM_TIMER_MAX_TICKS;
+// Motor PWM carrier frequency in kHz; raise/lower this to match the motor driver requirements.
 const PWM_FREQUENCY_KHZ: u32 = 20;
 
 #[allow(
@@ -87,18 +89,30 @@ pub async fn run(spawner: Spawner, peripherals: Peripherals) -> ! {
         None => RuntimeConfig::default(),
     };
 
+    // Leg 1 H-bridge enable GPIO for the motor channel treated as "left" drive.
     let leg_1_left_enable_pin = peripherals.GPIO4;
+    // Leg 1 H-bridge enable GPIO for the motor channel treated as "right" drive.
     let leg_1_right_enable_pin = peripherals.GPIO3;
+    // Leg 1 PWM GPIO for the left drive channel.
     let leg_1_left_pwm_pin = peripherals.GPIO2;
+    // Leg 1 PWM GPIO for the right drive channel.
     let leg_1_right_pwm_pin = peripherals.GPIO1;
+    // Leg 1 first hall/quadrature signal GPIO.
     let leg_1_hall1_pin = peripherals.GPIO5;
+    // Leg 1 second hall/quadrature signal GPIO.
     let leg_1_hall2_pin = peripherals.GPIO6;
 
+    // Leg 2 H-bridge enable GPIO for the motor channel treated as "left" drive.
     let leg_2_left_enable_pin = peripherals.GPIO10;
+    // Leg 2 H-bridge enable GPIO for the motor channel treated as "right" drive.
     let leg_2_right_enable_pin = peripherals.GPIO11;
+    // Leg 2 PWM GPIO for the left drive channel.
     let leg_2_left_pwm_pin = peripherals.GPIO12;
+    // Leg 2 PWM GPIO for the right drive channel.
     let leg_2_right_pwm_pin = peripherals.GPIO13;
+    // Leg 2 first hall/quadrature signal GPIO.
     let leg_2_hall1_pin = peripherals.GPIO9;
+    // Leg 2 second hall/quadrature signal GPIO.
     let leg_2_hall2_pin = peripherals.GPIO8;
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -180,7 +194,9 @@ pub async fn run(spawner: Spawner, peripherals: Peripherals) -> ! {
     let leg_1 = crate::leg::Leg::new(
         &LEG1_STATUS_STORAGE,
         LegConfig {
+            // Motor side that physically moves leg 1 upward.
             up_drive: DriveSide::Left,
+            // Encoder sign observed while leg 1 moves upward.
             up_direction: QuadratureDirection::Positive,
         },
         runtime_config_reader,
@@ -194,7 +210,9 @@ pub async fn run(spawner: Spawner, peripherals: Peripherals) -> ! {
     let leg_2 = crate::leg::Leg::new(
         &LEG2_STATUS_STORAGE,
         LegConfig {
+            // Motor side that physically moves leg 2 upward.
             up_drive: DriveSide::Left,
+            // Encoder sign observed while leg 2 moves upward.
             up_direction: QuadratureDirection::Positive,
         },
         runtime_config_reader,

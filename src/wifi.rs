@@ -17,7 +17,9 @@ use esp_radio::wifi::{
 };
 use static_cell::StaticCell;
 
+// Required compile-time WiFi network name. Set with `WIFI_SSID=...` when building.
 const WIFI_SSID: Option<&str> = option_env!("WIFI_SSID");
+// Optional compile-time WiFi password. Omit or set empty for open networks.
 const WIFI_PASSWORD: Option<&str> = option_env!("WIFI_PASSWORD");
 
 #[derive(Clone, Copy, Debug, defmt::Format)]

@@ -24,7 +24,9 @@ use esp_hal::{
 };
 use static_cell::StaticCell;
 
+// Bit position used for the first hall input when building a two-bit quadrature state.
 const HALL1_BIT: u8 = 0b10;
+// Bit position used for the second hall input when building a two-bit quadrature state.
 const HALL2_BIT: u8 = 0b01;
 
 // PCNT references:

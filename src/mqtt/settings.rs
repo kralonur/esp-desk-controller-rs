@@ -11,47 +11,85 @@ use rust_mqtt::{
 
 use super::topics::{CommandTopic, IncomingTopic, parse_override_topic};
 
+// Required compile-time IPv4 broker address, for example `192.168.1.10`.
 const MQTT_BROKER_ADDR: Option<&str> = option_env!("MQTT_BROKER_ADDR");
+// Optional compile-time broker TCP port; defaults to `DEFAULT_MQTT_PORT`.
 const MQTT_BROKER_PORT: Option<&str> = option_env!("MQTT_BROKER_PORT");
+// Optional compile-time MQTT username for brokers that require authentication.
 const MQTT_USERNAME: Option<&str> = option_env!("MQTT_USERNAME");
+// Optional compile-time MQTT password for brokers that require authentication.
 const MQTT_PASSWORD: Option<&str> = option_env!("MQTT_PASSWORD");
+// Required compile-time client ID base; `-cmd` and `-pub` are appended internally.
 const MQTT_CLIENT_ID: Option<&str> = option_env!("MQTT_CLIENT_ID");
+// Required compile-time topic root used to build every command/status/config topic.
 const MQTT_TOPIC_PREFIX: Option<&str> = option_env!("MQTT_TOPIC_PREFIX");
+// Optional compile-time MQTT keepalive in seconds; ping interval is half of this.
 const MQTT_KEEP_ALIVE_SECS: Option<&str> = option_env!("MQTT_KEEP_ALIVE_SECS");
+// Optional compile-time delay between reconnect attempts after MQTT failures.
 const MQTT_RECONNECT_DELAY_SECS: Option<&str> = option_env!("MQTT_RECONNECT_DELAY_SECS");
 
+// Bytes reserved for each MQTT TCP socket buffer.
 pub(super) const MQTT_TCP_BUFFER_SIZE: usize = 2048;
+// Maximum topic filters subscribed by the command client.
 pub(super) const MQTT_MAX_SUBSCRIBES: usize = 12;
+// MQTT receive window advertised to the broker.
 pub(super) const MQTT_RECEIVE_MAXIMUM: usize = 8;
+// MQTT send window used by the client.
 pub(super) const MQTT_SEND_MAXIMUM: usize = 8;
+// Maximum MQTT v5 subscription identifiers tracked by the client.
 pub(super) const MQTT_MAX_SUBSCRIPTION_IDENTIFIERS: usize = 4;
+// Default broker TCP port when `MQTT_BROKER_PORT` is not set.
 const DEFAULT_MQTT_PORT: u16 = 1883;
+// Default MQTT keepalive, in seconds, when `MQTT_KEEP_ALIVE_SECS` is not set.
 const DEFAULT_MQTT_KEEP_ALIVE_SECS: u64 = 30;
+// Default reconnect delay, in seconds, when `MQTT_RECONNECT_DELAY_SECS` is not set.
 const DEFAULT_MQTT_RECONNECT_DELAY_SECS: u64 = 5;
 
 #[derive(Clone)]
 pub(super) struct MqttSettings {
+    // Broker IPv4 address parsed from `MQTT_BROKER_ADDR`.
     pub(super) broker_addr: Ipv4Address,
+    // Broker TCP port parsed from `MQTT_BROKER_PORT` or `DEFAULT_MQTT_PORT`.
     pub(super) broker_port: u16,
+    // Optional broker username from `MQTT_USERNAME`.
     username: Option<&'static str>,
+    // Optional broker password from `MQTT_PASSWORD`.
     password: Option<&'static str>,
+    // MQTT keepalive interval from `MQTT_KEEP_ALIVE_SECS`.
     keep_alive: Duration,
+    // Ping cadence, derived as half of `keep_alive`.
     pub(super) ping_interval: Duration,
+    // Delay before reconnect attempts after connection failure.
     pub(super) reconnect_delay: Duration,
+    // Command client ID derived from `MQTT_CLIENT_ID`.
     command_client_id: String,
+    // Publisher client ID derived from `MQTT_CLIENT_ID`.
     publisher_client_id: String,
+    // Publish topic for current desk status.
     topic_status: String,
+    // Publish topic for command/config responses.
     topic_response: String,
+    // Publish topic for full runtime config snapshots.
     topic_config: String,
+    // Subscribe topic used to request a config snapshot.
     topic_config_get: String,
+    // Subscribe topic used to reset runtime config to defaults.
     topic_config_reset: String,
+    // Subscribe wildcard topic for runtime config field updates.
     topic_config_set_all: String,
+    // Subscribe topic for homing the full desk.
     topic_home: String,
+    // Subscribe topic for stopping active desk motion.
     topic_stop: String,
+    // Subscribe topic for moving the desk upward.
     topic_up: String,
+    // Subscribe topic for moving the desk downward.
     topic_down: String,
+    // Subscribe topic for moving the desk to an absolute encoder position.
     topic_move_to: String,
+    // Subscribe topic for moving the desk by a relative encoder delta.
     topic_move_by: String,
+    // Subscribe wildcard topic for manual override commands.
     topic_override_all: String,
 }
 
