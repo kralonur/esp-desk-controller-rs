@@ -225,7 +225,6 @@ pub(super) async fn run_desk_control<
                 if control_state.stop_requested() {
                     control_state.clear_stop_request();
                     info!("override command cancelled before start");
-                    control_state.finish_unhomed();
                     continue;
                 }
 
