@@ -3,8 +3,8 @@ use alloc::vec::Vec;
 use embassy_time::Duration;
 
 use crate::config::{
-    ConfigError, DeskConfig, LegRuntimeConfig, ObstructionProfileConfig, ObstructionSensitivity,
-    RuntimeConfig,
+    ConfigError, DeskConfig, DeskConfigParts, LegRuntimeConfig, LegRuntimeConfigParts,
+    ObstructionProfileConfig, ObstructionSensitivity, RuntimeConfig,
 };
 use crate::persistent_config::PersistError;
 use crate::units::{CountDelta, DutyPercent, DutyPercentTrim, Percent, PositionCounts};
@@ -105,98 +105,60 @@ pub fn decode_runtime_config(bytes: &[u8]) -> Result<RuntimeConfig, PersistError
         return Err(PersistError::InvalidFormat);
     }
 
-    let mut desk = DeskConfig::new();
-    desk.set_target_tolerance(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    desk.set_target_slow_zone(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    desk.set_move_timeout(reader.read_duration()?)
-        .map_err(config_error)?;
-    desk.set_obstruction_sample_window(reader.read_duration()?)
-        .map_err(config_error)?;
-    desk.set_obstruction_warmup_duration(reader.read_duration()?)
-        .map_err(config_error)?;
-    desk.set_obstruction_warmup_counts(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    desk.set_min_move_duty(reader.read_duty()?)
-        .map_err(config_error)?;
-    desk.set_move_run_duty(reader.read_duty()?)
-        .map_err(config_error)?;
-    desk.set_move_slow_duty(reader.read_duty()?)
-        .map_err(config_error)?;
-    desk.set_move_sync_duty_step(reader.read_trim()?)
-        .map_err(config_error)?;
-    desk.set_homing_poll_interval(reader.read_duration()?)
-        .map_err(config_error)?;
-    desk.set_homing_start_timeout(reader.read_duration()?)
-        .map_err(config_error)?;
-    desk.set_homing_stall_timeout(reader.read_duration()?)
-        .map_err(config_error)?;
-    desk.set_homing_backoff_steps(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    desk.set_homing_run_duty(reader.read_duty()?)
-        .map_err(config_error)?;
-    desk.set_homing_sync_duty_step(reader.read_trim()?)
-        .map_err(config_error)?;
-    desk.set_sync_speedup_enter_counts(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    desk.set_sync_speedup_exit_counts(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    desk.set_catch_up_enter_counts(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    desk.set_catch_up_exit_counts(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    desk.set_fault_skew_counts(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    desk.set_homing_fault_skew_counts(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    desk.set_obstruction_sensitivity(reader.read_obstruction_sensitivity()?)
-        .map_err(config_error)?;
-    desk.set_low_obstruction_profile(reader.read_profile()?)
-        .map_err(config_error)?;
-    desk.set_medium_obstruction_profile(reader.read_profile()?)
-        .map_err(config_error)?;
-    desk.set_high_obstruction_profile(reader.read_profile()?)
-        .map_err(config_error)?;
-    desk.set_override_unlock_timeout(reader.read_duration()?)
-        .map_err(config_error)?;
-    desk.set_mqtt_status_publish_interval(reader.read_duration()?)
-        .map_err(config_error)?;
+    let desk_parts = DeskConfigParts {
+        target_tolerance: reader.read_count_delta()?,
+        target_slow_zone: reader.read_count_delta()?,
+        move_timeout: reader.read_duration()?,
+        obstruction_sample_window: reader.read_duration()?,
+        obstruction_warmup_duration: reader.read_duration()?,
+        obstruction_warmup_counts: reader.read_count_delta()?,
+        min_move_duty: reader.read_duty()?,
+        move_run_duty: reader.read_duty()?,
+        move_slow_duty: reader.read_duty()?,
+        move_sync_duty_step: reader.read_trim()?,
+        homing_poll_interval: reader.read_duration()?,
+        homing_start_timeout: reader.read_duration()?,
+        homing_stall_timeout: reader.read_duration()?,
+        homing_backoff_steps: reader.read_count_delta()?,
+        homing_run_duty: reader.read_duty()?,
+        homing_sync_duty_step: reader.read_trim()?,
+        sync_speedup_enter_counts: reader.read_count_delta()?,
+        sync_speedup_exit_counts: reader.read_count_delta()?,
+        catch_up_enter_counts: reader.read_count_delta()?,
+        catch_up_exit_counts: reader.read_count_delta()?,
+        fault_skew_counts: reader.read_count_delta()?,
+        homing_fault_skew_counts: reader.read_count_delta()?,
+        obstruction_sensitivity: reader.read_obstruction_sensitivity()?,
+        low_obstruction_profile: reader.read_profile()?,
+        medium_obstruction_profile: reader.read_profile()?,
+        high_obstruction_profile: reader.read_profile()?,
+        override_unlock_timeout: reader.read_duration()?,
+        mqtt_status_publish_interval: reader.read_duration()?,
+    };
 
-    let mut leg = LegRuntimeConfig::new();
-    leg.set_startup_duty(reader.read_duty()?)
-        .map_err(config_error)?;
-    leg.set_max_duty(reader.read_duty()?)
-        .map_err(config_error)?;
-    leg.set_run_duty(reader.read_duty()?)
-        .map_err(config_error)?;
-    leg.set_slow_duty(reader.read_duty()?)
-        .map_err(config_error)?;
-    leg.set_homing_duty(reader.read_duty()?)
-        .map_err(config_error)?;
-    leg.set_startup_events(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    leg.set_homing_start_timeout(reader.read_duration()?)
-        .map_err(config_error)?;
-    leg.set_homing_stall_timeout(reader.read_duration()?)
-        .map_err(config_error)?;
-    leg.set_homing_poll_interval(reader.read_duration()?)
-        .map_err(config_error)?;
-    leg.set_homing_backoff_steps(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    leg.set_default_max_position(PositionCounts::new(reader.read_i32()?))
-        .map_err(config_error)?;
-    leg.set_move_stall_timeout(reader.read_duration()?)
-        .map_err(config_error)?;
-    leg.set_target_slow_zone(reader.read_count_delta()?)
-        .map_err(config_error)?;
-    leg.set_target_tolerance(reader.read_count_delta()?)
-        .map_err(config_error)?;
+    let leg_parts = LegRuntimeConfigParts {
+        startup_duty: reader.read_duty()?,
+        max_duty: reader.read_duty()?,
+        run_duty: reader.read_duty()?,
+        slow_duty: reader.read_duty()?,
+        homing_duty: reader.read_duty()?,
+        startup_events: reader.read_count_delta()?,
+        homing_start_timeout: reader.read_duration()?,
+        homing_stall_timeout: reader.read_duration()?,
+        homing_poll_interval: reader.read_duration()?,
+        homing_backoff_steps: reader.read_count_delta()?,
+        default_max_position: PositionCounts::new(reader.read_i32()?),
+        move_stall_timeout: reader.read_duration()?,
+        target_slow_zone: reader.read_count_delta()?,
+        target_tolerance: reader.read_count_delta()?,
+    };
 
     if !reader.is_done() {
         return Err(PersistError::InvalidFormat);
     }
 
+    let desk = DeskConfig::from_parts(desk_parts).map_err(config_error)?;
+    let leg = LegRuntimeConfig::from_parts(leg_parts).map_err(config_error)?;
     RuntimeConfig::from_parts(desk, leg).map_err(config_error)
 }
 
@@ -383,6 +345,34 @@ mod tests {
                 leg.set_default_max_position(PositionCounts::new(3456))
                     .map_err(|_| "invalid_config")?;
                 leg.set_slow_duty(DutyPercent::new(19))
+                    .map_err(|_| "invalid_config")
+            })
+            .unwrap();
+
+        let bytes = encode_runtime_config(config);
+        assert_eq!(decode_runtime_config(&bytes), Ok(config));
+    }
+
+    #[test]
+    fn config_with_transiently_invalid_decode_order_round_trips() {
+        let mut config = RuntimeConfig::default();
+        config
+            .update_desk(|desk| {
+                desk.set_move_run_duty(DutyPercent::new(20))
+                    .map_err(|_| "invalid_config")?;
+                desk.set_target_slow_zone(CountDelta::new(25))
+                    .map_err(|_| "invalid_config")?;
+                desk.set_target_tolerance(CountDelta::new(20))
+                    .map_err(|_| "invalid_config")
+            })
+            .unwrap();
+        config
+            .update_leg(|leg| {
+                leg.set_startup_duty(DutyPercent::new(25))
+                    .map_err(|_| "invalid_config")?;
+                leg.set_run_duty(DutyPercent::new(20))
+                    .map_err(|_| "invalid_config")?;
+                leg.set_max_duty(DutyPercent::new(25))
                     .map_err(|_| "invalid_config")
             })
             .unwrap();

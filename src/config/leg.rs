@@ -41,6 +41,24 @@ pub struct LegRuntimeConfig {
     target_tolerance: CountDelta,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LegRuntimeConfigParts {
+    pub(crate) startup_duty: DutyPercent,
+    pub(crate) max_duty: DutyPercent,
+    pub(crate) run_duty: DutyPercent,
+    pub(crate) slow_duty: DutyPercent,
+    pub(crate) homing_duty: DutyPercent,
+    pub(crate) startup_events: CountDelta,
+    pub(crate) homing_start_timeout: Duration,
+    pub(crate) homing_stall_timeout: Duration,
+    pub(crate) homing_poll_interval: Duration,
+    pub(crate) homing_backoff_steps: CountDelta,
+    pub(crate) default_max_position: PositionCounts,
+    pub(crate) move_stall_timeout: Duration,
+    pub(crate) target_slow_zone: CountDelta,
+    pub(crate) target_tolerance: CountDelta,
+}
+
 impl LegRuntimeConfig {
     pub const fn new() -> Self {
         let config = Self {
@@ -61,6 +79,26 @@ impl LegRuntimeConfig {
         };
         assert!(config.is_valid(), "invalid default leg config");
         config
+    }
+
+    pub(crate) fn from_parts(parts: LegRuntimeConfigParts) -> Result<Self, ConfigError> {
+        Self {
+            startup_duty: parts.startup_duty,
+            max_duty: parts.max_duty,
+            run_duty: parts.run_duty,
+            slow_duty: parts.slow_duty,
+            homing_duty: parts.homing_duty,
+            startup_events: parts.startup_events,
+            homing_start_timeout: parts.homing_start_timeout,
+            homing_stall_timeout: parts.homing_stall_timeout,
+            homing_poll_interval: parts.homing_poll_interval,
+            homing_backoff_steps: parts.homing_backoff_steps,
+            default_max_position: parts.default_max_position,
+            move_stall_timeout: parts.move_stall_timeout,
+            target_slow_zone: parts.target_slow_zone,
+            target_tolerance: parts.target_tolerance,
+        }
+        .validate()
     }
 
     /// Validate leg-only invariants before this config is installed or stored.
@@ -242,6 +280,27 @@ impl LegRuntimeConfig {
 
     pub fn set_target_tolerance(&mut self, value: CountDelta) -> Result<(), ConfigError> {
         self.update_checked(|config| config.target_tolerance = value)
+    }
+}
+
+impl From<LegRuntimeConfig> for LegRuntimeConfigParts {
+    fn from(config: LegRuntimeConfig) -> Self {
+        Self {
+            startup_duty: config.startup_duty,
+            max_duty: config.max_duty,
+            run_duty: config.run_duty,
+            slow_duty: config.slow_duty,
+            homing_duty: config.homing_duty,
+            startup_events: config.startup_events,
+            homing_start_timeout: config.homing_start_timeout,
+            homing_stall_timeout: config.homing_stall_timeout,
+            homing_poll_interval: config.homing_poll_interval,
+            homing_backoff_steps: config.homing_backoff_steps,
+            default_max_position: config.default_max_position,
+            move_stall_timeout: config.move_stall_timeout,
+            target_slow_zone: config.target_slow_zone,
+            target_tolerance: config.target_tolerance,
+        }
     }
 }
 

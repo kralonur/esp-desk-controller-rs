@@ -91,6 +91,38 @@ pub struct DeskConfig {
     mqtt_status_publish_interval: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeskConfigParts {
+    pub(crate) target_tolerance: CountDelta,
+    pub(crate) target_slow_zone: CountDelta,
+    pub(crate) move_timeout: Duration,
+    pub(crate) obstruction_sample_window: Duration,
+    pub(crate) obstruction_warmup_duration: Duration,
+    pub(crate) obstruction_warmup_counts: CountDelta,
+    pub(crate) min_move_duty: DutyPercent,
+    pub(crate) move_run_duty: DutyPercent,
+    pub(crate) move_slow_duty: DutyPercent,
+    pub(crate) move_sync_duty_step: DutyPercentTrim,
+    pub(crate) homing_poll_interval: Duration,
+    pub(crate) homing_start_timeout: Duration,
+    pub(crate) homing_stall_timeout: Duration,
+    pub(crate) homing_backoff_steps: CountDelta,
+    pub(crate) homing_run_duty: DutyPercent,
+    pub(crate) homing_sync_duty_step: DutyPercentTrim,
+    pub(crate) sync_speedup_enter_counts: CountDelta,
+    pub(crate) sync_speedup_exit_counts: CountDelta,
+    pub(crate) catch_up_enter_counts: CountDelta,
+    pub(crate) catch_up_exit_counts: CountDelta,
+    pub(crate) fault_skew_counts: CountDelta,
+    pub(crate) homing_fault_skew_counts: CountDelta,
+    pub(crate) obstruction_sensitivity: ObstructionSensitivity,
+    pub(crate) low_obstruction_profile: ObstructionProfileConfig,
+    pub(crate) medium_obstruction_profile: ObstructionProfileConfig,
+    pub(crate) high_obstruction_profile: ObstructionProfileConfig,
+    pub(crate) override_unlock_timeout: Duration,
+    pub(crate) mqtt_status_publish_interval: Duration,
+}
+
 impl DeskConfig {
     pub const fn new() -> Self {
         let config = Self {
@@ -125,6 +157,40 @@ impl DeskConfig {
         };
         assert!(config.is_valid(), "invalid default desk config");
         config
+    }
+
+    pub(crate) fn from_parts(parts: DeskConfigParts) -> Result<Self, ConfigError> {
+        Self {
+            target_tolerance: parts.target_tolerance,
+            target_slow_zone: parts.target_slow_zone,
+            move_timeout: parts.move_timeout,
+            obstruction_sample_window: parts.obstruction_sample_window,
+            obstruction_warmup_duration: parts.obstruction_warmup_duration,
+            obstruction_warmup_counts: parts.obstruction_warmup_counts,
+            min_move_duty: parts.min_move_duty,
+            move_run_duty: parts.move_run_duty,
+            move_slow_duty: parts.move_slow_duty,
+            move_sync_duty_step: parts.move_sync_duty_step,
+            homing_poll_interval: parts.homing_poll_interval,
+            homing_start_timeout: parts.homing_start_timeout,
+            homing_stall_timeout: parts.homing_stall_timeout,
+            homing_backoff_steps: parts.homing_backoff_steps,
+            homing_run_duty: parts.homing_run_duty,
+            homing_sync_duty_step: parts.homing_sync_duty_step,
+            sync_speedup_enter_counts: parts.sync_speedup_enter_counts,
+            sync_speedup_exit_counts: parts.sync_speedup_exit_counts,
+            catch_up_enter_counts: parts.catch_up_enter_counts,
+            catch_up_exit_counts: parts.catch_up_exit_counts,
+            fault_skew_counts: parts.fault_skew_counts,
+            homing_fault_skew_counts: parts.homing_fault_skew_counts,
+            obstruction_sensitivity: parts.obstruction_sensitivity,
+            low_obstruction_profile: parts.low_obstruction_profile,
+            medium_obstruction_profile: parts.medium_obstruction_profile,
+            high_obstruction_profile: parts.high_obstruction_profile,
+            override_unlock_timeout: parts.override_unlock_timeout,
+            mqtt_status_publish_interval: parts.mqtt_status_publish_interval,
+        }
+        .validate()
     }
 
     /// Validate desk-only invariants before this config is installed or stored.
@@ -460,6 +526,41 @@ impl DeskConfig {
     }
 }
 
+impl From<DeskConfig> for DeskConfigParts {
+    fn from(config: DeskConfig) -> Self {
+        Self {
+            target_tolerance: config.target_tolerance,
+            target_slow_zone: config.target_slow_zone,
+            move_timeout: config.move_timeout,
+            obstruction_sample_window: config.obstruction_sample_window,
+            obstruction_warmup_duration: config.obstruction_warmup_duration,
+            obstruction_warmup_counts: config.obstruction_warmup_counts,
+            min_move_duty: config.min_move_duty,
+            move_run_duty: config.move_run_duty,
+            move_slow_duty: config.move_slow_duty,
+            move_sync_duty_step: config.move_sync_duty_step,
+            homing_poll_interval: config.homing_poll_interval,
+            homing_start_timeout: config.homing_start_timeout,
+            homing_stall_timeout: config.homing_stall_timeout,
+            homing_backoff_steps: config.homing_backoff_steps,
+            homing_run_duty: config.homing_run_duty,
+            homing_sync_duty_step: config.homing_sync_duty_step,
+            sync_speedup_enter_counts: config.sync_speedup_enter_counts,
+            sync_speedup_exit_counts: config.sync_speedup_exit_counts,
+            catch_up_enter_counts: config.catch_up_enter_counts,
+            catch_up_exit_counts: config.catch_up_exit_counts,
+            fault_skew_counts: config.fault_skew_counts,
+            homing_fault_skew_counts: config.homing_fault_skew_counts,
+            obstruction_sensitivity: config.obstruction_sensitivity,
+            low_obstruction_profile: config.low_obstruction_profile,
+            medium_obstruction_profile: config.medium_obstruction_profile,
+            high_obstruction_profile: config.high_obstruction_profile,
+            override_unlock_timeout: config.override_unlock_timeout,
+            mqtt_status_publish_interval: config.mqtt_status_publish_interval,
+        }
+    }
+}
+
 impl Default for DeskConfig {
     fn default() -> Self {
         Self::new()
@@ -542,6 +643,18 @@ mod tests {
         let profile = ObstructionProfileConfig::new(Percent::new(90), 3);
         assert_eq!(
             config.set_low_obstruction_profile(profile),
+            Err(ConfigError::InvalidDeskConfig)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_parts() {
+        let mut parts = DeskConfigParts::from(DeskConfig::default());
+        parts.target_tolerance = CountDelta::new(20);
+        parts.target_slow_zone = CountDelta::new(10);
+
+        assert_eq!(
+            DeskConfig::from_parts(parts),
             Err(ConfigError::InvalidDeskConfig)
         );
     }

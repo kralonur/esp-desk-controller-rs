@@ -21,8 +21,10 @@ mod desk;
 mod leg;
 mod runtime;
 
+pub(crate) use desk::DeskConfigParts;
 pub use desk::{DeskConfig, ObstructionProfileConfig, ObstructionSensitivity};
 pub use leg::LegRuntimeConfig;
+pub(crate) use leg::LegRuntimeConfigParts;
 pub use runtime::{RuntimeConfig, RuntimeConfigReader, RuntimeConfigState, RuntimeConfigStorage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
