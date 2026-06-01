@@ -117,7 +117,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
 
     fn apply_up_drive_output(&mut self, duty: DutyPercent, runtime_config: LegRuntimeConfig) {
         self.apply_directional_drive_output(
-            self.config.up_drive,
+            self.config().up_drive,
             duty,
             MotionState::MovingUp,
             runtime_config,
@@ -126,7 +126,7 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
 
     fn apply_down_drive_output(&mut self, duty: DutyPercent, runtime_config: LegRuntimeConfig) {
         self.apply_directional_drive_output(
-            opposite_drive_side(self.config.up_drive),
+            opposite_drive_side(self.config().up_drive),
             duty,
             MotionState::MovingDown,
             runtime_config,

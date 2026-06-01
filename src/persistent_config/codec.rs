@@ -3,16 +3,19 @@ use alloc::vec::Vec;
 use embassy_time::Duration;
 
 use crate::config::{
-    ConfigError, DeskConfig, DeskConfigParts, LegRuntimeConfig, LegRuntimeConfigParts,
-    ObstructionProfileConfig, ObstructionSensitivity, RuntimeConfig,
+    ConfigError, DeskConfig, DeskConfigParts, HardwareConfig, HardwareConfigParts,
+    LegRuntimeConfig, LegRuntimeConfigParts, ObstructionProfileConfig, ObstructionSensitivity,
+    RuntimeConfig,
 };
+use crate::leg::DriveSide;
 use crate::persistent_config::PersistError;
+use crate::quadrature::QuadratureDirection;
 use crate::units::{CountDelta, DutyPercent, DutyPercentTrim, Percent, PositionCounts};
 
 // Private blob format marker for this firmware. This lets us reject unrelated/corrupt NVS blobs
 // before decoding fields as runtime config.
 const CONFIG_MAGIC: [u8; 4] = *b"DPWM";
-const CONFIG_VERSION: u16 = 2;
+const CONFIG_VERSION: u16 = 3;
 
 const U8_LEN: usize = core::mem::size_of::<u8>();
 const I32_LEN: usize = core::mem::size_of::<i32>();
@@ -25,9 +28,12 @@ const DUTY_TRIM_LEN: usize = U8_LEN;
 const DURATION_MS_LEN: usize = U64_LEN;
 const OBSTRUCTION_SENSITIVITY_LEN: usize = U8_LEN;
 const OBSTRUCTION_PROFILE_LEN: usize = U8_LEN + U8_LEN;
+const DRIVE_SIDE_LEN: usize = U8_LEN;
+const QUADRATURE_DIRECTION_LEN: usize = U8_LEN;
 const CONFIG_MAGIC_LEN: usize = CONFIG_MAGIC.len();
 const CONFIG_VERSION_LEN: usize = U16_LEN;
 const CONFIG_HEADER_LEN: usize = CONFIG_MAGIC_LEN + CONFIG_VERSION_LEN;
+const HARDWARE_CONFIG_LEN: usize = DRIVE_SIDE_LEN * 2 + QUADRATURE_DIRECTION_LEN * 2;
 const DESK_CONFIG_LEN: usize = COUNT_DELTA_LEN * 10
     + DUTY_PERCENT_LEN * 4
     + DUTY_TRIM_LEN * 2
@@ -37,12 +43,19 @@ const DESK_CONFIG_LEN: usize = COUNT_DELTA_LEN * 10
     + DURATION_MS_LEN;
 const LEG_CONFIG_LEN: usize =
     DUTY_PERCENT_LEN * 5 + COUNT_DELTA_LEN * 4 + DURATION_MS_LEN * 4 + I32_LEN;
-const CONFIG_BLOB_LEN: usize = CONFIG_HEADER_LEN + DESK_CONFIG_LEN + LEG_CONFIG_LEN;
+const CONFIG_BLOB_LEN: usize =
+    CONFIG_HEADER_LEN + HARDWARE_CONFIG_LEN + DESK_CONFIG_LEN + LEG_CONFIG_LEN;
 
 pub fn encode_runtime_config(config: RuntimeConfig) -> Vec<u8> {
     let mut out = Vec::with_capacity(CONFIG_BLOB_LEN);
     out.extend_from_slice(&CONFIG_MAGIC);
     push_u16(&mut out, CONFIG_VERSION);
+
+    let hardware = config.hardware();
+    push_drive_side(&mut out, hardware.left_up_drive());
+    push_quadrature_direction(&mut out, hardware.left_up_direction());
+    push_drive_side(&mut out, hardware.right_up_drive());
+    push_quadrature_direction(&mut out, hardware.right_up_direction());
 
     let desk = config.desk();
     push_count_delta(&mut out, desk.target_tolerance());
@@ -105,6 +118,13 @@ pub fn decode_runtime_config(bytes: &[u8]) -> Result<RuntimeConfig, PersistError
         return Err(PersistError::InvalidFormat);
     }
 
+    let hardware_parts = HardwareConfigParts {
+        left_up_drive: reader.read_drive_side()?,
+        left_up_direction: reader.read_quadrature_direction()?,
+        right_up_drive: reader.read_drive_side()?,
+        right_up_direction: reader.read_quadrature_direction()?,
+    };
+
     let desk_parts = DeskConfigParts {
         target_tolerance: reader.read_count_delta()?,
         target_slow_zone: reader.read_count_delta()?,
@@ -157,9 +177,10 @@ pub fn decode_runtime_config(bytes: &[u8]) -> Result<RuntimeConfig, PersistError
         return Err(PersistError::InvalidFormat);
     }
 
+    let hardware = HardwareConfig::from_parts(hardware_parts).map_err(config_error)?;
     let desk = DeskConfig::from_parts(desk_parts).map_err(config_error)?;
     let leg = LegRuntimeConfig::from_parts(leg_parts).map_err(config_error)?;
-    RuntimeConfig::from_parts(desk, leg).map_err(config_error)
+    RuntimeConfig::from_parts(desk, hardware, leg).map_err(config_error)
 }
 
 fn config_error(_error: ConfigError) -> PersistError {
@@ -184,6 +205,21 @@ fn push_duty(out: &mut Vec<u8>, value: DutyPercent) {
 
 fn push_trim(out: &mut Vec<u8>, value: DutyPercentTrim) {
     out.push(value.get() as u8);
+}
+
+fn push_drive_side(out: &mut Vec<u8>, value: DriveSide) {
+    out.push(match value {
+        DriveSide::Left => 0,
+        DriveSide::Right => 1,
+    });
+}
+
+fn push_quadrature_direction(out: &mut Vec<u8>, value: QuadratureDirection) {
+    out.push(match value {
+        QuadratureDirection::Positive => 0,
+        QuadratureDirection::Negative => 1,
+        QuadratureDirection::Invalid => 2,
+    });
 }
 
 fn push_duration(out: &mut Vec<u8>, value: Duration) {
@@ -274,6 +310,22 @@ impl<'a> ConfigReader<'a> {
             1 => Ok(ObstructionSensitivity::Low),
             2 => Ok(ObstructionSensitivity::Medium),
             3 => Ok(ObstructionSensitivity::High),
+            _ => Err(PersistError::InvalidConfig),
+        }
+    }
+
+    fn read_drive_side(&mut self) -> Result<DriveSide, PersistError> {
+        match self.read_u8()? {
+            0 => Ok(DriveSide::Left),
+            1 => Ok(DriveSide::Right),
+            _ => Err(PersistError::InvalidConfig),
+        }
+    }
+
+    fn read_quadrature_direction(&mut self) -> Result<QuadratureDirection, PersistError> {
+        match self.read_u8()? {
+            0 => Ok(QuadratureDirection::Positive),
+            1 => Ok(QuadratureDirection::Negative),
             _ => Err(PersistError::InvalidConfig),
         }
     }

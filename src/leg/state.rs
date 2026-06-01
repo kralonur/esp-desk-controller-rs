@@ -2,7 +2,7 @@ use embassy_executor::Spawner;
 use esp_hal::mcpwm::PwmPeripheral;
 
 use crate::{
-    config::{LegRuntimeConfig, RuntimeConfigReader},
+    config::{HardwareLegSide, LegRuntimeConfig, RuntimeConfigReader},
     motor::Motor,
     quadrature::{QuadratureDirection, QuadratureWatcher},
     units::PositionSign,
@@ -31,6 +31,15 @@ pub struct LegConfig {
     pub up_direction: QuadratureDirection,
 }
 
+impl LegConfig {
+    pub const fn position_sign(self) -> PositionSign {
+        match self.up_direction {
+            QuadratureDirection::Positive | QuadratureDirection::Invalid => PositionSign::Positive,
+            QuadratureDirection::Negative => PositionSign::Negative,
+        }
+    }
+}
+
 /// Typestate data for a homed leg with known travel limits.
 pub struct Ready {
     pub(super) min_position: i32,
@@ -46,7 +55,7 @@ pub struct Ready {
 /// The `State` typestate controls whether movement may use configured travel
 /// limits. Unhomed legs can home; ready legs can move to targets.
 pub struct Leg<'a, State, const OP: u8, PWM: PwmPeripheral> {
-    pub(super) config: LegConfig,
+    pub(super) side: HardwareLegSide,
     pub(super) runtime_config_reader: RuntimeConfigReader,
     pub(super) motor: Motor<'a, OP, PWM>,
     pub(super) quadrature_watcher: QuadratureWatcher,
@@ -56,19 +65,23 @@ pub struct Leg<'a, State, const OP: u8, PWM: PwmPeripheral> {
 }
 
 impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
+    pub(super) fn config(&self) -> LegConfig {
+        self.runtime_config_reader
+            .current()
+            .hardware()
+            .leg_config(self.side)
+    }
+
     pub(super) fn configured_up_direction(&self) -> QuadratureDirection {
-        self.config.up_direction
+        self.config().up_direction
     }
 
     pub(super) fn configured_down_direction(&self) -> QuadratureDirection {
-        opposite_direction(self.config.up_direction)
+        opposite_direction(self.config().up_direction)
     }
 
     pub(super) fn position_sign(&self) -> PositionSign {
-        match self.config.up_direction {
-            QuadratureDirection::Positive | QuadratureDirection::Invalid => PositionSign::Positive,
-            QuadratureDirection::Negative => PositionSign::Negative,
-        }
+        self.config().position_sign()
     }
 
     /// Current logical position after applying configured encoder polarity.
@@ -125,7 +138,8 @@ impl<'a, State, const OP: u8, PWM: PwmPeripheral> Leg<'a, State, OP, PWM> {
     pub fn progress_watcher(&self) -> LegProgressWatcher {
         LegProgressWatcher {
             quadrature_watcher: self.quadrature_watcher.resubscribe(),
-            position_sign: self.position_sign(),
+            runtime_config_reader: self.runtime_config_reader,
+            side: self.side,
         }
     }
 }
@@ -149,36 +163,38 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
     /// Build an unhomed leg and start mirroring quadrature events into status.
     pub fn new(
         storage: &'static LegStatusStorage,
-        config: LegConfig,
+        side: HardwareLegSide,
         runtime_config_reader: RuntimeConfigReader,
         motor: Motor<'a, OP, PWM>,
         quadrature_watcher: QuadratureWatcher,
         status_quadrature_watcher: QuadratureWatcher,
         spawner: &Spawner,
     ) -> Self {
+        let position_sign = runtime_config_reader
+            .current()
+            .hardware()
+            .leg_config(side)
+            .position_sign();
         let initial_status = LegStatus {
-            position: quadrature_watcher.snapshot().position,
+            position: position_sign.apply(quadrature_watcher.snapshot().position),
             min_position: 0,
             max_position: 0,
             duty: 0,
             motion: MotionState::Idle,
             homed: false,
         };
-        let status_state = storage.state.init(LegStatusState::new(
-            initial_status,
-            match config.up_direction {
-                QuadratureDirection::Positive | QuadratureDirection::Invalid => {
-                    PositionSign::Positive
-                }
-                QuadratureDirection::Negative => PositionSign::Negative,
-            },
-        ));
+        let status_state = storage.state.init(LegStatusState::new(initial_status));
         spawner.spawn(
-            mirror_quadrature_to_leg_status(status_quadrature_watcher, status_state)
-                .expect("spawn quadrature status mirror task"),
+            mirror_quadrature_to_leg_status(
+                status_quadrature_watcher,
+                status_state,
+                runtime_config_reader,
+                side,
+            )
+            .expect("spawn quadrature status mirror task"),
         );
         let leg = Self {
-            config,
+            side,
             runtime_config_reader,
             motor,
             quadrature_watcher,
@@ -199,10 +215,10 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Unhomed, OP, PWM> {
         let down_direction = self.configured_down_direction();
 
         self.status_state
-            .publish_position(self.quadrature_watcher.snapshot().position);
+            .publish_position(self.quadrature_watcher.snapshot().position, position_sign);
 
         Leg {
-            config: self.config,
+            side: self.side,
             runtime_config_reader: self.runtime_config_reader,
             motor: self.motor,
             quadrature_watcher: self.quadrature_watcher,
@@ -254,7 +270,7 @@ impl<'a, const OP: u8, PWM: PwmPeripheral> Leg<'a, Ready, OP, PWM> {
         });
 
         Leg {
-            config: self.config,
+            side: self.side,
             runtime_config_reader: self.runtime_config_reader,
             motor: self.motor,
             quadrature_watcher: self.quadrature_watcher,

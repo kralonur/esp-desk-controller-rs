@@ -10,8 +10,9 @@ use defmt::warn;
 use super::{
     commands::IncomingResponse,
     parsing::{
-        parse_count_delta, parse_duration_ms, parse_duty_percent, parse_duty_trim,
-        parse_obstruction_sensitivity, parse_percent, parse_position_counts, parse_windows,
+        parse_count_delta, parse_drive_side, parse_duration_ms, parse_duty_percent,
+        parse_duty_trim, parse_obstruction_sensitivity, parse_percent, parse_position_counts,
+        parse_quadrature_direction, parse_windows,
     },
     responses::config_error_name,
 };
@@ -140,11 +141,40 @@ pub(super) fn erase_persisted_config(
 }
 
 pub(super) fn handle_config_set(
+    state: &DeskControllerState,
     runtime_config_state: &RuntimeConfigState,
     field_path: &str,
     payload: &str,
 ) -> Result<(), &'static str> {
     match field_path {
+        "hardware/left/up_drive" => {
+            apply_hardware_update(state, runtime_config_state, |hardware| {
+                hardware
+                    .set_left_up_drive(parse_drive_side(payload)?)
+                    .map_err(config_error_name)
+            })
+        }
+        "hardware/left/up_direction" => {
+            apply_hardware_update(state, runtime_config_state, |hardware| {
+                hardware
+                    .set_left_up_direction(parse_quadrature_direction(payload)?)
+                    .map_err(config_error_name)
+            })
+        }
+        "hardware/right/up_drive" => {
+            apply_hardware_update(state, runtime_config_state, |hardware| {
+                hardware
+                    .set_right_up_drive(parse_drive_side(payload)?)
+                    .map_err(config_error_name)
+            })
+        }
+        "hardware/right/up_direction" => {
+            apply_hardware_update(state, runtime_config_state, |hardware| {
+                hardware
+                    .set_right_up_direction(parse_quadrature_direction(payload)?)
+                    .map_err(config_error_name)
+            })
+        }
         "desk/target_tolerance" => apply_desk_update(runtime_config_state, |desk| {
             desk.set_target_tolerance(parse_count_delta(payload)?)
                 .map_err(config_error_name)
@@ -390,6 +420,20 @@ fn apply_leg_update(
     update_fn: impl FnOnce(&mut crate::config::LegRuntimeConfig) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
     apply_runtime_update(runtime_config_state, |config| config.update_leg(update_fn))
+}
+
+fn apply_hardware_update(
+    state: &DeskControllerState,
+    runtime_config_state: &RuntimeConfigState,
+    update_fn: impl FnOnce(&mut crate::config::HardwareConfig) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    if !state.can_update_hardware_config() {
+        return Err("rejected_not_idle_unhomed");
+    }
+
+    apply_runtime_update(runtime_config_state, |config| {
+        config.update_hardware(update_fn)
+    })
 }
 
 fn apply_runtime_update(

@@ -78,6 +78,14 @@ pub(super) fn handle_incoming_topic(
             publish_config: true,
         },
         IncomingTopic::ConfigReset => {
+            if !state.can_update_hardware_config() {
+                return IncomingResponse {
+                    response: config_command_error_response("reset", "rejected_not_idle_unhomed"),
+                    publish_status: false,
+                    publish_config: false,
+                };
+            }
+
             let persist_result = erase_persisted_config(runtime_config_persistence);
             let result = if persist_result.is_ok() {
                 runtime_config_state.replace(Default::default())
@@ -101,7 +109,7 @@ pub(super) fn handle_incoming_topic(
             }
         }
         IncomingTopic::ConfigSet(field_path) => {
-            let result = handle_config_set(runtime_config_state, field_path, payload);
+            let result = handle_config_set(state, runtime_config_state, field_path, payload);
             let persist_result = if result.is_ok() {
                 Some(save_or_defer_config(
                     state,

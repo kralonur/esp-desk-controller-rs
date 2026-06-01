@@ -27,13 +27,13 @@ use esp_hal::{
 use static_cell::StaticCell;
 
 use crate::{
-    config::{RuntimeConfig, RuntimeConfigStorage},
+    config::{HardwareLegSide, RuntimeConfig, RuntimeConfigStorage},
     controller::DeskControllerState,
     desk::{Desk, DeskStatusStorage},
-    leg::{DriveSide, LegConfig, LegStatusStorage},
+    leg::LegStatusStorage,
     motor::Motor,
     persistent_config::{PersistError, RuntimeConfigPersistence},
-    quadrature::{Quadrature, QuadratureDirection, QuadratureStorage},
+    quadrature::{Quadrature, QuadratureStorage},
     units::PWM_TIMER_MAX_TICKS,
 };
 
@@ -193,12 +193,7 @@ pub async fn run(spawner: Spawner, peripherals: Peripherals) -> ! {
 
     let leg_1 = crate::leg::Leg::new(
         &LEG1_STATUS_STORAGE,
-        LegConfig {
-            // Motor side that physically moves leg 1 upward.
-            up_drive: DriveSide::Left,
-            // Encoder sign observed while leg 1 moves upward.
-            up_direction: QuadratureDirection::Positive,
-        },
+        HardwareLegSide::Left,
         runtime_config_reader,
         motor_1,
         leg_watcher_1,
@@ -209,12 +204,7 @@ pub async fn run(spawner: Spawner, peripherals: Peripherals) -> ! {
 
     let leg_2 = crate::leg::Leg::new(
         &LEG2_STATUS_STORAGE,
-        LegConfig {
-            // Motor side that physically moves leg 2 upward.
-            up_drive: DriveSide::Left,
-            // Encoder sign observed while leg 2 moves upward.
-            up_direction: QuadratureDirection::Positive,
-        },
+        HardwareLegSide::Right,
         runtime_config_reader,
         motor_2,
         leg_watcher_2,

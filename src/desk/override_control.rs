@@ -299,6 +299,10 @@ where
         OverrideLegDirection::Up => leg.up_direction(),
         OverrideLegDirection::Down => leg.down_direction(),
     };
+    let wrong_direction = match direction {
+        OverrideLegDirection::Up => leg.down_direction(),
+        OverrideLegDirection::Down => leg.up_direction(),
+    };
     if expected_direction == QuadratureDirection::Invalid {
         leg.apply_drive_mode(DriveMode::Stop, leg_config);
         return Ok(DeskOverrideOutcome::Completed);
@@ -339,6 +343,11 @@ where
                 running = true;
             }
             continue;
+        }
+
+        if progressed_in_direction(last_position, current_position, wrong_direction) {
+            leg.apply_drive_mode(DriveMode::Stop, leg_config);
+            return Err(LegError::PolarityMismatch);
         }
 
         if Instant::now().saturating_duration_since(last_progress_at)

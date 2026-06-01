@@ -3,15 +3,16 @@ use core::cell::Cell;
 use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use static_cell::StaticCell;
 
-use crate::config::{ConfigError, DeskConfig, LegRuntimeConfig};
+use crate::config::{ConfigError, DeskConfig, HardwareConfig, LegRuntimeConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Complete validated runtime configuration snapshot.
 ///
-/// Desk and leg settings are validated together because several desk-level
-/// thresholds and duties must fit inside leg-level limits.
+/// Desk, hardware, and leg settings are validated together because several
+/// desk-level thresholds and duties must fit inside leg-level limits.
 pub struct RuntimeConfig {
     desk: DeskConfig,
+    hardware: HardwareConfig,
     leg: LegRuntimeConfig,
 }
 
@@ -41,21 +42,25 @@ impl RuntimeConfig {
     pub const fn new() -> Self {
         Self {
             desk: DeskConfig::new(),
+            hardware: HardwareConfig::new(),
             leg: LegRuntimeConfig::new(),
         }
     }
 
-    /// Validate desk, leg, and cross-field invariants for this snapshot.
+    /// Validate desk, hardware, leg, and cross-field invariants for this snapshot.
     pub const fn validate(self) -> Result<Self, ConfigError> {
         match self.desk.validate() {
-            Ok(_) => match self.leg.validate() {
-                Ok(_) => {
-                    if self.is_cross_valid() {
-                        Ok(self)
-                    } else {
-                        Err(ConfigError::InvalidDeskConfig)
+            Ok(_) => match self.hardware.validate() {
+                Ok(_) => match self.leg.validate() {
+                    Ok(_) => {
+                        if self.is_cross_valid() {
+                            Ok(self)
+                        } else {
+                            Err(ConfigError::InvalidDeskConfig)
+                        }
                     }
-                }
+                    Err(error) => Err(error),
+                },
                 Err(error) => Err(error),
             },
             Err(error) => Err(error),
@@ -97,12 +102,25 @@ impl RuntimeConfig {
     }
 
     /// Build a snapshot from component configs after cross-validation.
-    pub const fn from_parts(desk: DeskConfig, leg: LegRuntimeConfig) -> Result<Self, ConfigError> {
-        Self { desk, leg }.validate()
+    pub const fn from_parts(
+        desk: DeskConfig,
+        hardware: HardwareConfig,
+        leg: LegRuntimeConfig,
+    ) -> Result<Self, ConfigError> {
+        Self {
+            desk,
+            hardware,
+            leg,
+        }
+        .validate()
     }
 
     pub const fn desk(self) -> DeskConfig {
         self.desk
+    }
+
+    pub const fn hardware(self) -> HardwareConfig {
+        self.hardware
     }
 
     pub const fn leg(self) -> LegRuntimeConfig {
@@ -135,6 +153,21 @@ impl RuntimeConfig {
             Ok(())
         } else {
             self.leg = previous;
+            Err("invalid_config")
+        }
+    }
+
+    /// Mutate hardware config transactionally, reverting if full validation fails.
+    pub fn update_hardware(
+        &mut self,
+        update_fn: impl FnOnce(&mut HardwareConfig) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        let previous = self.hardware;
+        update_fn(&mut self.hardware)?;
+        if self.validate().is_ok() {
+            Ok(())
+        } else {
+            self.hardware = previous;
             Err("invalid_config")
         }
     }

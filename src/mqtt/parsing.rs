@@ -4,6 +4,8 @@ use embassy_time::Duration;
 
 use crate::{
     config::ObstructionSensitivity,
+    leg::DriveSide,
+    quadrature::QuadratureDirection,
     units::{CountDelta, DutyPercent, DutyPercentTrim, Percent, PositionCounts},
 };
 
@@ -72,6 +74,22 @@ pub(super) fn parse_obstruction_sensitivity(
         "low" => Ok(ObstructionSensitivity::Low),
         "medium" => Ok(ObstructionSensitivity::Medium),
         "high" => Ok(ObstructionSensitivity::High),
+        _ => Err("invalid_payload"),
+    }
+}
+
+pub(super) fn parse_drive_side(value: &str) -> Result<DriveSide, &'static str> {
+    match value {
+        "left" => Ok(DriveSide::Left),
+        "right" => Ok(DriveSide::Right),
+        _ => Err("invalid_payload"),
+    }
+}
+
+pub(super) fn parse_quadrature_direction(value: &str) -> Result<QuadratureDirection, &'static str> {
+    match value {
+        "positive" => Ok(QuadratureDirection::Positive),
+        "negative" => Ok(QuadratureDirection::Negative),
         _ => Err("invalid_payload"),
     }
 }

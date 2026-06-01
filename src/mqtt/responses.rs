@@ -7,6 +7,8 @@ use crate::{
         DeskFault,
     },
     desk::{DeskLegSide, DeskMotionState, DeskMoveInvariant, DeskStopReason, OverrideLegDirection},
+    leg::DriveSide,
+    quadrature::QuadratureDirection,
 };
 
 pub(super) fn status_response(state: &DeskControllerState) -> String {
@@ -121,6 +123,7 @@ pub(super) fn override_response_body(
 pub(super) fn config_response(runtime_config_state: &RuntimeConfigState) -> String {
     let config = runtime_config_state.current();
     let desk = config.desk();
+    let hardware = config.hardware();
     let leg = config.leg();
     let low_profile = desk
         .obstruction_profile(ObstructionSensitivity::Low)
@@ -133,7 +136,11 @@ pub(super) fn config_response(runtime_config_state: &RuntimeConfigState) -> Stri
         .expect("high obstruction profile must exist");
 
     format!(
-        "desk.target_tolerance={}\n\
+        "hardware.left_up_drive={}\n\
+hardware.left_up_direction={}\n\
+hardware.right_up_drive={}\n\
+hardware.right_up_direction={}\n\
+desk.target_tolerance={}\n\
 desk.target_slow_zone={}\n\
 desk.move_timeout_ms={}\n\
 desk.obstruction_sample_window_ms={}\n\
@@ -178,6 +185,10 @@ leg.default_max_position={}\n\
 leg.move_stall_timeout_ms={}\n\
 leg.target_slow_zone={}\n\
 leg.target_tolerance={}\n",
+        drive_side_name(hardware.left_up_drive()),
+        quadrature_direction_name(hardware.left_up_direction()),
+        drive_side_name(hardware.right_up_drive()),
+        quadrature_direction_name(hardware.right_up_direction()),
         desk.target_tolerance().get(),
         desk.target_slow_zone().get(),
         desk.move_timeout().as_millis(),
@@ -228,7 +239,9 @@ leg.target_tolerance={}\n",
 
 pub(super) fn config_error_name(error: ConfigError) -> &'static str {
     match error {
-        ConfigError::InvalidDeskConfig | ConfigError::InvalidLegConfig => "invalid_config",
+        ConfigError::InvalidDeskConfig
+        | ConfigError::InvalidHardwareConfig
+        | ConfigError::InvalidLegConfig => "invalid_config",
     }
 }
 
@@ -299,6 +312,21 @@ pub(super) fn leg_side_name(side: DeskLegSide) -> &'static str {
     match side {
         DeskLegSide::Left => "left",
         DeskLegSide::Right => "right",
+    }
+}
+
+pub(super) fn drive_side_name(side: DriveSide) -> &'static str {
+    match side {
+        DriveSide::Left => "left",
+        DriveSide::Right => "right",
+    }
+}
+
+pub(super) fn quadrature_direction_name(direction: QuadratureDirection) -> &'static str {
+    match direction {
+        QuadratureDirection::Positive => "positive",
+        QuadratureDirection::Negative => "negative",
+        QuadratureDirection::Invalid => "invalid",
     }
 }
 

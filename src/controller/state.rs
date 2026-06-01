@@ -238,6 +238,16 @@ impl DeskControllerState {
             )
     }
 
+    pub fn can_update_hardware_config(&self) -> bool {
+        let snapshot = self.snapshot();
+        !snapshot.command_pending
+            && !snapshot.stop_requested
+            && matches!(
+                snapshot.mode,
+                DeskControllerMode::Unhomed | DeskControllerMode::Faulted
+            )
+    }
+
     fn submit_motion(&self, command: DeskCommand) -> CommandSubmission {
         let snapshot = self.snapshot();
         if snapshot.command_pending

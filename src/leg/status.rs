@@ -8,7 +8,11 @@ use embassy_sync::{
 };
 use static_cell::StaticCell;
 
-use crate::{quadrature::QuadratureWatcher, units::PositionSign};
+use crate::{
+    config::{HardwareLegSide, RuntimeConfigReader},
+    quadrature::QuadratureWatcher,
+    units::PositionSign,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Format)]
 /// Current motion intent reported for one leg.
@@ -48,19 +52,18 @@ pub struct LegStatusWatcher {
 /// Async watcher for logical encoder progress.
 pub struct LegProgressWatcher {
     pub(super) quadrature_watcher: QuadratureWatcher,
-    pub(super) position_sign: PositionSign,
+    pub(super) runtime_config_reader: RuntimeConfigReader,
+    pub(super) side: HardwareLegSide,
 }
 
 pub(super) struct LegStatusState {
-    pub(super) position_sign: PositionSign,
     status: Mutex<CriticalSectionRawMutex, RefCell<LegStatus>>,
     pub(super) watch: Watch<CriticalSectionRawMutex, LegStatus, 4>,
 }
 
 impl LegStatusState {
-    pub(super) fn new(initial_status: LegStatus, position_sign: PositionSign) -> Self {
+    pub(super) fn new(initial_status: LegStatus) -> Self {
         Self {
-            position_sign,
             status: Mutex::new(RefCell::new(initial_status)),
             watch: Watch::new(),
         }
@@ -85,12 +88,8 @@ impl LegStatusState {
         }
     }
 
-    pub(super) fn logical_position(&self, raw_position: i32) -> i32 {
-        self.position_sign.apply(raw_position)
-    }
-
-    pub(super) fn publish_position(&self, raw_position: i32) {
-        let position = self.logical_position(raw_position);
+    pub(super) fn publish_position(&self, raw_position: i32, position_sign: PositionSign) {
+        let position = position_sign.apply(raw_position);
         let (status, changed) = self.status.lock(|cached_status| {
             let mut cached_status = cached_status.borrow_mut();
             if cached_status.position == position {
@@ -110,10 +109,17 @@ impl LegStatusState {
 pub(super) async fn mirror_quadrature_to_leg_status(
     mut quadrature_watcher: QuadratureWatcher,
     status_state: &'static LegStatusState,
+    runtime_config_reader: RuntimeConfigReader,
+    side: HardwareLegSide,
 ) {
     loop {
         let event = quadrature_watcher.wait_for_change().await;
-        status_state.publish_position(event.snapshot.position);
+        let position_sign = runtime_config_reader
+            .current()
+            .hardware()
+            .leg_config(side)
+            .position_sign();
+        status_state.publish_position(event.snapshot.position, position_sign);
     }
 }
 
@@ -140,8 +146,14 @@ impl LegStatusWatcher {
 impl LegProgressWatcher {
     pub async fn wait_for_change(&mut self) -> LegProgress {
         let event = self.quadrature_watcher.wait_for_change().await;
+        let position_sign = self
+            .runtime_config_reader
+            .current()
+            .hardware()
+            .leg_config(self.side)
+            .position_sign();
         LegProgress {
-            position: self.position_sign.apply(event.snapshot.position),
+            position: position_sign.apply(event.snapshot.position),
         }
     }
 }
