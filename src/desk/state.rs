@@ -195,6 +195,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         right_leg: Leg<'a, Unhomed, RIGHT_OP, RightPwm>,
         stop_reason: DeskStopReason,
     ) -> Self {
+        let (left_leg, right_leg) = reset_unhomed_leg_positions(left_leg, right_leg);
         self.left = Some(ManagedLeg::Unhomed(left_leg));
         self.right = Some(ManagedLeg::Unhomed(right_leg));
         self.update_status(|status| {
@@ -273,6 +274,7 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         right_leg: Leg<'a, Unhomed, RIGHT_OP, RightPwm>,
         error: DeskError,
     ) -> (Self, DeskError) {
+        let (left_leg, right_leg) = reset_unhomed_leg_positions(left_leg, right_leg);
         self.left = Some(ManagedLeg::Unhomed(left_leg));
         self.right = Some(ManagedLeg::Unhomed(right_leg));
         self.update_status(|status| {
@@ -288,6 +290,26 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         });
         (self, error)
     }
+}
+
+fn reset_unhomed_leg_positions<
+    'a,
+    const LEFT_OP: u8,
+    LeftPwm: PwmPeripheral,
+    const RIGHT_OP: u8,
+    RightPwm: PwmPeripheral,
+>(
+    left_leg: Leg<'a, Unhomed, LEFT_OP, LeftPwm>,
+    right_leg: Leg<'a, Unhomed, RIGHT_OP, RightPwm>,
+) -> (
+    Leg<'a, Unhomed, LEFT_OP, LeftPwm>,
+    Leg<'a, Unhomed, RIGHT_OP, RightPwm>,
+) {
+    left_leg.reset_position();
+    right_leg.reset_position();
+    left_leg.publish_status();
+    right_leg.publish_status();
+    (left_leg, right_leg)
 }
 
 impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm: PwmPeripheral>
