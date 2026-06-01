@@ -27,6 +27,7 @@ use esp_hal::{
 use static_cell::StaticCell;
 
 use crate::{
+    board::AppResources,
     config::{HardwareLegSide, RuntimeConfig, RuntimeConfigStorage},
     controller::DeskControllerState,
     desk::{Desk, DeskStatusStorage},
@@ -63,8 +64,10 @@ pub async fn run(spawner: Spawner, peripherals: Peripherals) -> ! {
         StaticCell::new();
     static DESK_CONTROL_STATE_STORAGE: StaticCell<DeskControllerState> = StaticCell::new();
 
+    let resources = AppResources::split(peripherals);
+
     let mut runtime_config_persistence: Option<&'static mut RuntimeConfigPersistence> =
-        match RuntimeConfigPersistence::new(peripherals.FLASH) {
+        match RuntimeConfigPersistence::new(resources.flash) {
             Ok(persistence) => Some(RUNTIME_CONFIG_PERSISTENCE_STORAGE.init(persistence)),
             Err(error) => {
                 warn!("persistent config storage unavailable: {:?}", error);
@@ -89,38 +92,12 @@ pub async fn run(spawner: Spawner, peripherals: Peripherals) -> ! {
         None => RuntimeConfig::default(),
     };
 
-    // Leg 1 H-bridge enable GPIO for the motor channel treated as "left" drive.
-    let leg_1_left_enable_pin = peripherals.GPIO4;
-    // Leg 1 H-bridge enable GPIO for the motor channel treated as "right" drive.
-    let leg_1_right_enable_pin = peripherals.GPIO3;
-    // Leg 1 PWM GPIO for the left drive channel.
-    let leg_1_left_pwm_pin = peripherals.GPIO2;
-    // Leg 1 PWM GPIO for the right drive channel.
-    let leg_1_right_pwm_pin = peripherals.GPIO1;
-    // Leg 1 first hall/quadrature signal GPIO.
-    let leg_1_hall1_pin = peripherals.GPIO5;
-    // Leg 1 second hall/quadrature signal GPIO.
-    let leg_1_hall2_pin = peripherals.GPIO6;
-
-    // Leg 2 H-bridge enable GPIO for the motor channel treated as "left" drive.
-    let leg_2_left_enable_pin = peripherals.GPIO10;
-    // Leg 2 H-bridge enable GPIO for the motor channel treated as "right" drive.
-    let leg_2_right_enable_pin = peripherals.GPIO11;
-    // Leg 2 PWM GPIO for the left drive channel.
-    let leg_2_left_pwm_pin = peripherals.GPIO12;
-    // Leg 2 PWM GPIO for the right drive channel.
-    let leg_2_right_pwm_pin = peripherals.GPIO13;
-    // Leg 2 first hall/quadrature signal GPIO.
-    let leg_2_hall1_pin = peripherals.GPIO9;
-    // Leg 2 second hall/quadrature signal GPIO.
-    let leg_2_hall2_pin = peripherals.GPIO8;
-
-    let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let software_interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    let timg0 = TimerGroup::new(resources.timer_group0);
+    let software_interrupt = SoftwareInterruptControl::new(resources.software_interrupt);
     esp_rtos::start(timg0.timer0, software_interrupt.software_interrupt0);
 
     let rng = Rng::new();
-    let stack = match crate::wifi::start_wifi(peripherals.WIFI, rng, &spawner).await {
+    let stack = match crate::wifi::start_wifi(resources.wifi, rng, &spawner).await {
         Ok(stack) => stack,
         Err(error) => {
             warn!("wifi setup failed: {:?}", error);
@@ -132,23 +109,26 @@ pub async fn run(spawner: Spawner, peripherals: Peripherals) -> ! {
     info!("main continuing after wifi setup");
 
     let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40)).unwrap();
-    let mut mcpwm = McPwm::new(peripherals.MCPWM0, clock_cfg);
+    let mut mcpwm = McPwm::new(resources.mcpwm0, clock_cfg);
     mcpwm.operator0.set_timer(&mcpwm.timer0);
     mcpwm.operator1.set_timer(&mcpwm.timer0);
 
+    let left_leg_pins = resources.desk_pins.left_leg;
+    let right_leg_pins = resources.desk_pins.right_leg;
+
     let mut motor_1 = Motor::new(
-        leg_1_left_enable_pin,
-        leg_1_right_enable_pin,
-        leg_1_left_pwm_pin,
-        leg_1_right_pwm_pin,
+        left_leg_pins.drive_left_enable,
+        left_leg_pins.drive_right_enable,
+        left_leg_pins.drive_left_pwm,
+        left_leg_pins.drive_right_pwm,
         mcpwm.operator0,
     );
 
     let mut motor_2 = Motor::new(
-        leg_2_left_enable_pin,
-        leg_2_right_enable_pin,
-        leg_2_left_pwm_pin,
-        leg_2_right_pwm_pin,
+        right_leg_pins.drive_left_enable,
+        right_leg_pins.drive_right_enable,
+        right_leg_pins.drive_left_pwm,
+        right_leg_pins.drive_right_pwm,
         mcpwm.operator1,
     );
 
@@ -161,14 +141,14 @@ pub async fn run(spawner: Spawner, peripherals: Peripherals) -> ! {
         .unwrap();
     mcpwm.timer0.start(timer_clock_cfg);
 
-    let mut pcnt = Pcnt::new(peripherals.PCNT);
+    let mut pcnt = Pcnt::new(resources.pcnt);
     pcnt.set_interrupt_handler(crate::quadrature::pcnt_interrupt_handler);
 
     let (quadrature_1, _snapshot_1) = Quadrature::<0>::new(
         &QUADRATURE1_STORAGE,
         pcnt.unit0,
-        leg_1_hall1_pin,
-        leg_1_hall2_pin,
+        left_leg_pins.hall_a,
+        left_leg_pins.hall_b,
     );
     let leg_watcher_1 = quadrature_1.watcher();
     let leg_status_source_1 = quadrature_1.watcher();
@@ -177,8 +157,8 @@ pub async fn run(spawner: Spawner, peripherals: Peripherals) -> ! {
     let (quadrature_2, _snapshot_2) = Quadrature::<1>::new(
         &QUADRATURE2_STORAGE,
         pcnt.unit1,
-        leg_2_hall1_pin,
-        leg_2_hall2_pin,
+        right_leg_pins.hall_a,
+        right_leg_pins.hall_b,
     );
     let leg_watcher_2 = quadrature_2.watcher();
     let leg_status_source_2 = quadrature_2.watcher();

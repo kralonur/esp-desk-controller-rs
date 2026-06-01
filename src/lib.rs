@@ -11,6 +11,7 @@
 extern crate alloc;
 
 pub mod app;
+pub(crate) mod board;
 pub mod config;
 pub mod controller;
 pub mod desk;
