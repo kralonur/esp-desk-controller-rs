@@ -3,7 +3,7 @@ use core::str::FromStr;
 use embassy_time::Duration;
 
 use crate::{
-    config::ObstructionSensitivity,
+    config::{HomingObstructionSensitivity, ObstructionSensitivity},
     leg::DriveSide,
     quadrature::QuadratureDirection,
     units::{CountDelta, DutyPercent, DutyPercentTrim, Percent, PositionCounts},
@@ -74,6 +74,16 @@ pub(super) fn parse_obstruction_sensitivity(
         "low" => Ok(ObstructionSensitivity::Low),
         "medium" => Ok(ObstructionSensitivity::Medium),
         "high" => Ok(ObstructionSensitivity::High),
+        _ => Err("invalid_payload"),
+    }
+}
+
+pub(super) fn parse_homing_obstruction_sensitivity(
+    value: &str,
+) -> Result<HomingObstructionSensitivity, &'static str> {
+    match value {
+        "off" => Ok(HomingObstructionSensitivity::Off),
+        "on" => Ok(HomingObstructionSensitivity::On),
         _ => Err("invalid_payload"),
     }
 }

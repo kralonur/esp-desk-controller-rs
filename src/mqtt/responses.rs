@@ -1,7 +1,9 @@
 use alloc::{format, string::String};
 
 use crate::{
-    config::{ConfigError, ObstructionSensitivity, RuntimeConfigState},
+    config::{
+        ConfigError, HomingObstructionSensitivity, ObstructionSensitivity, RuntimeConfigState,
+    },
     controller::{
         CommandSubmission, DeskControllerMode, DeskControllerSnapshot, DeskControllerState,
         DeskFault,
@@ -15,7 +17,7 @@ pub(super) fn status_response(state: &DeskControllerState) -> String {
     let snapshot = state.snapshot();
     let status = state.status();
     format!(
-        "mode={}\ncommand_pending={}\nstop_requested={}\nlast_fault={}\nhomed={}\nneeds_rehome={}\nmotion={}\nlast_stop_reason={}\nobstruction_sensitivity={}\ntarget_active={}\ntarget_position={}\naverage_position={}\nleft_position={}\nright_position={}\nleft_duty={}\nright_duty={}\nmin_position={}\nmax_position={}\nskew_counts={}\n",
+        "mode={}\ncommand_pending={}\nstop_requested={}\nlast_fault={}\nhomed={}\nneeds_rehome={}\nmotion={}\nlast_stop_reason={}\nobstruction_sensitivity={}\nhoming_obstruction_sensitivity={}\ntarget_active={}\ntarget_position={}\naverage_position={}\nleft_position={}\nright_position={}\nleft_duty={}\nright_duty={}\nmin_position={}\nmax_position={}\nskew_counts={}\n",
         controller_mode_name(snapshot.mode),
         bool_name(snapshot.command_pending),
         bool_name(snapshot.stop_requested),
@@ -25,6 +27,7 @@ pub(super) fn status_response(state: &DeskControllerState) -> String {
         motion_name(status.motion),
         stop_reason_name(status.last_stop_reason),
         obstruction_sensitivity_name(state.obstruction_sensitivity()),
+        homing_obstruction_sensitivity_name(state.homing_obstruction_sensitivity()),
         bool_name(status.target_active),
         status.target_position,
         status.average_position,
@@ -134,6 +137,7 @@ pub(super) fn config_response(runtime_config_state: &RuntimeConfigState) -> Stri
     let high_profile = desk
         .obstruction_profile(ObstructionSensitivity::High)
         .expect("high obstruction profile must exist");
+    let homing_profile = desk.homing_obstruction_config();
 
     format!(
         "hardware.left_up_drive={}\n\
@@ -169,6 +173,9 @@ desk.medium_obstruction_min_percent={}\n\
 desk.medium_obstruction_windows={}\n\
 desk.high_obstruction_min_percent={}\n\
 desk.high_obstruction_windows={}\n\
+desk.homing_obstruction_sensitivity={}\n\
+desk.homing_obstruction_min_percent={}\n\
+desk.homing_obstruction_windows={}\n\
 desk.override_unlock_timeout_ms={}\n\
 desk.mqtt_status_publish_interval_ms={}\n\
 leg.startup_duty={}\n\
@@ -218,6 +225,9 @@ leg.target_tolerance={}\n",
         medium_profile.consecutive_windows(),
         high_profile.minimum_baseline_percent().get(),
         high_profile.consecutive_windows(),
+        homing_obstruction_sensitivity_name(desk.homing_obstruction_sensitivity()),
+        homing_profile.minimum_baseline_percent().get(),
+        homing_profile.consecutive_windows(),
         desk.override_unlock_timeout().as_millis(),
         desk.mqtt_status_publish_interval().as_millis(),
         leg.startup_duty().get(),
@@ -305,6 +315,15 @@ pub(super) fn obstruction_sensitivity_name(sensitivity: ObstructionSensitivity) 
         ObstructionSensitivity::Low => "low",
         ObstructionSensitivity::Medium => "medium",
         ObstructionSensitivity::High => "high",
+    }
+}
+
+pub(super) fn homing_obstruction_sensitivity_name(
+    sensitivity: HomingObstructionSensitivity,
+) -> &'static str {
+    match sensitivity {
+        HomingObstructionSensitivity::Off => "off",
+        HomingObstructionSensitivity::On => "on",
     }
 }
 

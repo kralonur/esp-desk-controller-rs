@@ -3,13 +3,14 @@ use embassy_time::{Instant, Timer};
 use esp_hal::mcpwm::PwmPeripheral;
 
 use crate::{
-    config::LegRuntimeConfig,
+    config::{DeskConfig, LegRuntimeConfig},
     leg::{DriveMode, Leg, LegError, Unhomed},
     quadrature::QuadratureDirection,
     units::CountDelta,
 };
 
 use super::{
+    monitor::HomingContactMonitor,
     position::{progressed_in_direction, travel_in_direction},
     state::{Desk, DeskError, UnhomedDesk},
     status::{DeskMotionState, DeskStopReason},
@@ -68,6 +69,7 @@ impl<
     {
         let mut desk = self.force_unhomed();
         let runtime_config = desk.runtime_config_reader.current();
+        let desk_config = runtime_config.desk();
         let leg_config = runtime_config.leg();
         desk.update_status(|status| {
             status.homed = false;
@@ -82,10 +84,11 @@ impl<
 
         let result = match side {
             DeskLegSide::Left => {
-                override_home_one_leg(&mut left_leg, leg_config, &stop_requested).await
+                override_home_one_leg(&mut left_leg, desk_config, leg_config, &stop_requested).await
             }
             DeskLegSide::Right => {
-                override_home_one_leg(&mut right_leg, leg_config, &stop_requested).await
+                override_home_one_leg(&mut right_leg, desk_config, leg_config, &stop_requested)
+                    .await
             }
         };
 
@@ -191,6 +194,7 @@ impl<
 
 async fn override_home_one_leg<'a, StopRequested, const OP: u8, PWM: PwmPeripheral>(
     leg: &mut Leg<'a, Unhomed, OP, PWM>,
+    desk_config: DeskConfig,
     leg_config: LegRuntimeConfig,
     stop_requested: &StopRequested,
 ) -> Result<DeskOverrideOutcome, LegError>
@@ -232,7 +236,14 @@ where
     }
 
     let mut last_position = leg.encoder_position();
-    let mut last_progress_at = Instant::now();
+    let homing_contact_started_at = Instant::now();
+    let mut last_progress_at = homing_contact_started_at;
+    let mut contact_monitor = HomingContactMonitor::new(
+        desk_config,
+        homing_contact_started_at,
+        last_position,
+        down_direction,
+    );
     leg.apply_drive_mode(DriveMode::HomeDown, leg_config);
 
     loop {
@@ -242,16 +253,21 @@ where
         }
 
         Timer::after(leg_config.homing_poll_interval()).await;
+        let now = Instant::now();
         let current_position = leg.encoder_position();
         if progressed_in_direction(last_position, current_position, down_direction) {
             last_position = current_position;
-            last_progress_at = Instant::now();
-            continue;
+            last_progress_at = now;
         }
 
-        if Instant::now().saturating_duration_since(last_progress_at)
-            >= leg_config.homing_stall_timeout()
+        if contact_monitor
+            .as_mut()
+            .is_some_and(|monitor| monitor.observe(now, current_position, false))
         {
+            break;
+        }
+
+        if now.saturating_duration_since(last_progress_at) >= leg_config.homing_stall_timeout() {
             break;
         }
     }

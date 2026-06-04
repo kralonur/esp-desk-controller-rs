@@ -4,8 +4,8 @@ use embassy_time::Duration;
 
 use crate::config::{
     ConfigError, DeskConfig, DeskConfigParts, HardwareConfig, HardwareConfigParts,
-    LegRuntimeConfig, LegRuntimeConfigParts, ObstructionProfileConfig, ObstructionSensitivity,
-    RuntimeConfig,
+    HomingObstructionSensitivity, LegRuntimeConfig, LegRuntimeConfigParts,
+    ObstructionProfileConfig, ObstructionSensitivity, RuntimeConfig,
 };
 use crate::leg::DriveSide;
 use crate::persistent_config::PersistError;
@@ -15,7 +15,7 @@ use crate::units::{CountDelta, DutyPercent, DutyPercentTrim, Percent, PositionCo
 // Private blob format marker for this firmware. This lets us reject unrelated/corrupt NVS blobs
 // before decoding fields as runtime config.
 const CONFIG_MAGIC: [u8; 4] = *b"DPWM";
-const CONFIG_VERSION: u16 = 3;
+const CONFIG_VERSION: u16 = 4;
 
 const U8_LEN: usize = core::mem::size_of::<u8>();
 const I32_LEN: usize = core::mem::size_of::<i32>();
@@ -27,6 +27,7 @@ const DUTY_PERCENT_LEN: usize = U8_LEN;
 const DUTY_TRIM_LEN: usize = U8_LEN;
 const DURATION_MS_LEN: usize = U64_LEN;
 const OBSTRUCTION_SENSITIVITY_LEN: usize = U8_LEN;
+const HOMING_OBSTRUCTION_SENSITIVITY_LEN: usize = U8_LEN;
 const OBSTRUCTION_PROFILE_LEN: usize = U8_LEN + U8_LEN;
 const DRIVE_SIDE_LEN: usize = U8_LEN;
 const QUADRATURE_DIRECTION_LEN: usize = U8_LEN;
@@ -40,6 +41,8 @@ const DESK_CONFIG_LEN: usize = COUNT_DELTA_LEN * 10
     + DURATION_MS_LEN * 7
     + OBSTRUCTION_SENSITIVITY_LEN
     + OBSTRUCTION_PROFILE_LEN * 3
+    + HOMING_OBSTRUCTION_SENSITIVITY_LEN
+    + OBSTRUCTION_PROFILE_LEN
     + DURATION_MS_LEN;
 const LEG_CONFIG_LEN: usize =
     DUTY_PERCENT_LEN * 5 + COUNT_DELTA_LEN * 4 + DURATION_MS_LEN * 4 + I32_LEN;
@@ -84,6 +87,10 @@ pub fn encode_runtime_config(config: RuntimeConfig) -> Vec<u8> {
     push_profile(&mut out, desk, ObstructionSensitivity::Low);
     push_profile(&mut out, desk, ObstructionSensitivity::Medium);
     push_profile(&mut out, desk, ObstructionSensitivity::High);
+    out.push(homing_obstruction_sensitivity_byte(
+        desk.homing_obstruction_sensitivity(),
+    ));
+    push_obstruction_profile(&mut out, desk.homing_obstruction_config());
     push_duration(&mut out, desk.override_unlock_timeout());
     push_duration(&mut out, desk.mqtt_status_publish_interval());
 
@@ -152,6 +159,8 @@ pub fn decode_runtime_config(bytes: &[u8]) -> Result<RuntimeConfig, PersistError
         low_obstruction_profile: reader.read_profile()?,
         medium_obstruction_profile: reader.read_profile()?,
         high_obstruction_profile: reader.read_profile()?,
+        homing_obstruction_sensitivity: reader.read_homing_obstruction_sensitivity()?,
+        homing_obstruction_profile: reader.read_profile()?,
         override_unlock_timeout: reader.read_duration()?,
         mqtt_status_publish_interval: reader.read_duration()?,
     };
@@ -191,6 +200,11 @@ fn push_profile(out: &mut Vec<u8>, desk: DeskConfig, sensitivity: ObstructionSen
     let profile = desk
         .obstruction_profile(sensitivity)
         .expect("profile must exist");
+    out.push(profile.minimum_baseline_percent().get());
+    out.push(profile.consecutive_windows());
+}
+
+fn push_obstruction_profile(out: &mut Vec<u8>, profile: ObstructionProfileConfig) {
     out.push(profile.minimum_baseline_percent().get());
     out.push(profile.consecutive_windows());
 }
@@ -248,6 +262,13 @@ fn obstruction_sensitivity_byte(value: ObstructionSensitivity) -> u8 {
         ObstructionSensitivity::Low => 1,
         ObstructionSensitivity::Medium => 2,
         ObstructionSensitivity::High => 3,
+    }
+}
+
+fn homing_obstruction_sensitivity_byte(value: HomingObstructionSensitivity) -> u8 {
+    match value {
+        HomingObstructionSensitivity::Off => 0,
+        HomingObstructionSensitivity::On => 1,
     }
 }
 
@@ -310,6 +331,16 @@ impl<'a> ConfigReader<'a> {
             1 => Ok(ObstructionSensitivity::Low),
             2 => Ok(ObstructionSensitivity::Medium),
             3 => Ok(ObstructionSensitivity::High),
+            _ => Err(PersistError::InvalidConfig),
+        }
+    }
+
+    fn read_homing_obstruction_sensitivity(
+        &mut self,
+    ) -> Result<HomingObstructionSensitivity, PersistError> {
+        match self.read_u8()? {
+            0 => Ok(HomingObstructionSensitivity::Off),
+            1 => Ok(HomingObstructionSensitivity::On),
             _ => Err(PersistError::InvalidConfig),
         }
     }

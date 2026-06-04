@@ -26,7 +26,9 @@ mod leg;
 mod runtime;
 
 pub(crate) use desk::DeskConfigParts;
-pub use desk::{DeskConfig, ObstructionProfileConfig, ObstructionSensitivity};
+pub use desk::{
+    DeskConfig, HomingObstructionSensitivity, ObstructionProfileConfig, ObstructionSensitivity,
+};
 pub(crate) use hardware::HardwareConfigParts;
 pub use hardware::{HardwareConfig, HardwareLegSide};
 pub use leg::LegRuntimeConfig;

@@ -58,6 +58,12 @@ const DEFAULT_MEDIUM_OBSTRUCTION_PROFILE: ObstructionProfileConfig =
 // High sensitivity obstruction threshold: speed may fall to 80 percent for 2 windows.
 const DEFAULT_HIGH_OBSTRUCTION_PROFILE: ObstructionProfileConfig =
     ObstructionProfileConfig::new(Percent::new(80), 2);
+// Default homing lower-stop contact detection state.
+const DEFAULT_HOMING_OBSTRUCTION_SENSITIVITY: HomingObstructionSensitivity =
+    HomingObstructionSensitivity::On;
+// Homing contact threshold: speed may fall to 80 percent for 2 windows.
+const DEFAULT_HOMING_OBSTRUCTION_PROFILE: ObstructionProfileConfig =
+    ObstructionProfileConfig::new(Percent::new(80), 2);
 // How long manual override access remains unlocked without a command.
 const DEFAULT_OVERRIDE_UNLOCK_TIMEOUT: Duration = Duration::from_millis(120_000);
 // Minimum interval between MQTT status publishes during normal operation.
@@ -74,6 +80,15 @@ pub enum ObstructionSensitivity {
     Medium,
     /// Use the most sensitive obstruction profile.
     High,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+/// Homing lower-stop contact detection state.
+pub enum HomingObstructionSensitivity {
+    /// Disable speed-drop contact detection during homing.
+    Off,
+    /// Enable speed-drop contact detection during homing.
+    On,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +162,10 @@ pub struct DeskConfig {
     medium_obstruction_profile: ObstructionProfileConfig,
     // MQTT `desk/high_obstruction_min_percent` and `desk/high_obstruction_windows`.
     high_obstruction_profile: ObstructionProfileConfig,
+    // MQTT `desk/homing_obstruction_sensitivity`: homing contact detection on/off.
+    homing_obstruction_sensitivity: HomingObstructionSensitivity,
+    // MQTT `desk/homing_obstruction_min_percent` and `desk/homing_obstruction_windows`.
+    homing_obstruction_profile: ObstructionProfileConfig,
     // MQTT `desk/override_unlock_timeout_ms`: manual override idle timeout, in milliseconds.
     override_unlock_timeout: Duration,
     // MQTT `desk/mqtt_status_publish_interval_ms`: minimum status publish interval.
@@ -181,6 +200,8 @@ pub(crate) struct DeskConfigParts {
     pub(crate) low_obstruction_profile: ObstructionProfileConfig,
     pub(crate) medium_obstruction_profile: ObstructionProfileConfig,
     pub(crate) high_obstruction_profile: ObstructionProfileConfig,
+    pub(crate) homing_obstruction_sensitivity: HomingObstructionSensitivity,
+    pub(crate) homing_obstruction_profile: ObstructionProfileConfig,
     pub(crate) override_unlock_timeout: Duration,
     pub(crate) mqtt_status_publish_interval: Duration,
 }
@@ -214,6 +235,8 @@ impl DeskConfig {
             low_obstruction_profile: DEFAULT_LOW_OBSTRUCTION_PROFILE,
             medium_obstruction_profile: DEFAULT_MEDIUM_OBSTRUCTION_PROFILE,
             high_obstruction_profile: DEFAULT_HIGH_OBSTRUCTION_PROFILE,
+            homing_obstruction_sensitivity: DEFAULT_HOMING_OBSTRUCTION_SENSITIVITY,
+            homing_obstruction_profile: DEFAULT_HOMING_OBSTRUCTION_PROFILE,
             override_unlock_timeout: DEFAULT_OVERRIDE_UNLOCK_TIMEOUT,
             mqtt_status_publish_interval: DEFAULT_MQTT_STATUS_PUBLISH_INTERVAL,
         };
@@ -249,6 +272,8 @@ impl DeskConfig {
             low_obstruction_profile: parts.low_obstruction_profile,
             medium_obstruction_profile: parts.medium_obstruction_profile,
             high_obstruction_profile: parts.high_obstruction_profile,
+            homing_obstruction_sensitivity: parts.homing_obstruction_sensitivity,
+            homing_obstruction_profile: parts.homing_obstruction_profile,
             override_unlock_timeout: parts.override_unlock_timeout,
             mqtt_status_publish_interval: parts.mqtt_status_publish_interval,
         }
@@ -333,6 +358,8 @@ impl DeskConfig {
                 self.medium_obstruction_profile,
                 self.high_obstruction_profile,
             )
+            // Homing contact detection can be enabled independently of move obstruction detection.
+            && self.homing_obstruction_profile.is_valid()
             // Override access must eventually expire.
             && self.override_unlock_timeout.as_millis() > 0
             // Status publishing must not spin continuously.
@@ -429,6 +456,21 @@ impl DeskConfig {
             ObstructionSensitivity::Medium => Some(self.medium_obstruction_profile),
             ObstructionSensitivity::High => Some(self.high_obstruction_profile),
         }
+    }
+
+    pub const fn homing_obstruction_sensitivity(self) -> HomingObstructionSensitivity {
+        self.homing_obstruction_sensitivity
+    }
+
+    pub const fn homing_obstruction_profile(self) -> Option<ObstructionProfileConfig> {
+        match self.homing_obstruction_sensitivity {
+            HomingObstructionSensitivity::Off => None,
+            HomingObstructionSensitivity::On => Some(self.homing_obstruction_profile),
+        }
+    }
+
+    pub const fn homing_obstruction_config(self) -> ObstructionProfileConfig {
+        self.homing_obstruction_profile
     }
 
     pub fn override_unlock_timeout(self) -> Duration {
@@ -555,6 +597,20 @@ impl DeskConfig {
         self.update_checked(|config| config.high_obstruction_profile = value)
     }
 
+    pub fn set_homing_obstruction_sensitivity(
+        &mut self,
+        value: HomingObstructionSensitivity,
+    ) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.homing_obstruction_sensitivity = value)
+    }
+
+    pub fn set_homing_obstruction_profile(
+        &mut self,
+        value: ObstructionProfileConfig,
+    ) -> Result<(), ConfigError> {
+        self.update_checked(|config| config.homing_obstruction_profile = value)
+    }
+
     pub fn set_override_unlock_timeout(&mut self, value: Duration) -> Result<(), ConfigError> {
         self.update_checked(|config| config.override_unlock_timeout = value)
     }
@@ -617,6 +673,8 @@ impl From<DeskConfig> for DeskConfigParts {
             low_obstruction_profile: config.low_obstruction_profile,
             medium_obstruction_profile: config.medium_obstruction_profile,
             high_obstruction_profile: config.high_obstruction_profile,
+            homing_obstruction_sensitivity: config.homing_obstruction_sensitivity,
+            homing_obstruction_profile: config.homing_obstruction_profile,
             override_unlock_timeout: config.override_unlock_timeout,
             mqtt_status_publish_interval: config.mqtt_status_publish_interval,
         }

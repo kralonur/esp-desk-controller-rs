@@ -6,7 +6,7 @@ use embassy_sync::{
 };
 use embassy_time::{Duration, Instant};
 
-use crate::config::{ObstructionSensitivity, RuntimeConfigReader};
+use crate::config::{HomingObstructionSensitivity, ObstructionSensitivity, RuntimeConfigReader};
 use crate::controller::{
     command::{CommandSubmission, DeskCommand, OverrideCommand, StopSubmission},
     status::{DeskControllerMode, DeskControllerSnapshot, DeskFault},
@@ -59,6 +59,13 @@ impl DeskControllerState {
             .current()
             .desk()
             .obstruction_sensitivity()
+    }
+
+    pub fn homing_obstruction_sensitivity(&self) -> HomingObstructionSensitivity {
+        self.runtime_config_reader
+            .current()
+            .desk()
+            .homing_obstruction_sensitivity()
     }
 
     pub fn override_unlocked(&self) -> bool {

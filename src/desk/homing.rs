@@ -7,6 +7,7 @@ use crate::{
 };
 
 use super::{
+    monitor::HomingContactMonitor,
     planning::{LegPlan, SyncPhase, apply_dual_plan, next_sync_phase, plan_homing_down},
     position::{progressed_in_direction, travel_in_direction},
     state::{Desk, DeskError, ManagedLeg, ReadyDesk, UnhomedDesk},
@@ -244,8 +245,21 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
         // skew bounded so one side cannot keep moving far after the other stalls.
         let mut left_last_position = left_leg.encoder_position();
         let mut right_last_position = right_leg.encoder_position();
-        let mut left_last_progress = Instant::now();
-        let mut right_last_progress = Instant::now();
+        let homing_contact_started_at = Instant::now();
+        let mut left_last_progress = homing_contact_started_at;
+        let mut right_last_progress = homing_contact_started_at;
+        let mut left_contact_monitor = HomingContactMonitor::new(
+            desk_config,
+            homing_contact_started_at,
+            left_last_position,
+            left_direction,
+        );
+        let mut right_contact_monitor = HomingContactMonitor::new(
+            desk_config,
+            homing_contact_started_at,
+            right_last_position,
+            right_direction,
+        );
         let mut left_stalled = false;
         let mut right_stalled = false;
         let mut homing_sync_phase = SyncPhase::Balanced;
@@ -258,13 +272,14 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             }
 
             Timer::after(desk_config.homing_poll_interval()).await;
+            let now = Instant::now();
 
             if !left_stalled {
                 let current_position = left_leg.encoder_position();
                 if progressed_in_direction(left_last_position, current_position, left_direction) {
                     left_last_position = current_position;
-                    left_last_progress = Instant::now();
-                } else if Instant::now().saturating_duration_since(left_last_progress)
+                    left_last_progress = now;
+                } else if now.saturating_duration_since(left_last_progress)
                     >= desk_config.homing_stall_timeout()
                 {
                     left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
@@ -276,8 +291,8 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
                 let current_position = right_leg.encoder_position();
                 if progressed_in_direction(right_last_position, current_position, right_direction) {
                     right_last_position = current_position;
-                    right_last_progress = Instant::now();
-                } else if Instant::now().saturating_duration_since(right_last_progress)
+                    right_last_progress = now;
+                } else if now.saturating_duration_since(right_last_progress)
                     >= desk_config.homing_stall_timeout()
                 {
                     right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
@@ -305,6 +320,34 @@ impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm
             } else {
                 SyncPhase::Balanced
             };
+            let contact_detection_suspended = !matches!(active_phase, SyncPhase::Balanced);
+
+            if !left_stalled
+                && left_contact_monitor.as_mut().is_some_and(|monitor| {
+                    monitor.observe(
+                        now,
+                        left_leg.encoder_position(),
+                        contact_detection_suspended,
+                    )
+                })
+            {
+                left_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                left_stalled = true;
+            }
+
+            if !right_stalled
+                && right_contact_monitor.as_mut().is_some_and(|monitor| {
+                    monitor.observe(
+                        now,
+                        right_leg.encoder_position(),
+                        contact_detection_suspended,
+                    )
+                })
+            {
+                right_leg.apply_drive_mode(DriveMode::Stop, leg_config);
+                right_stalled = true;
+            }
+
             let mut plan = plan_homing_down(desk_config, active_phase, lead_left);
 
             if left_stalled {

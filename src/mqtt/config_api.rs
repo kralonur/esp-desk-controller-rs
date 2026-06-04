@@ -11,8 +11,8 @@ use super::{
     commands::IncomingResponse,
     parsing::{
         parse_count_delta, parse_drive_side, parse_duration_ms, parse_duty_percent,
-        parse_duty_trim, parse_obstruction_sensitivity, parse_percent, parse_position_counts,
-        parse_quadrature_direction, parse_windows,
+        parse_duty_trim, parse_homing_obstruction_sensitivity, parse_obstruction_sensitivity,
+        parse_percent, parse_position_counts, parse_quadrature_direction, parse_windows,
     },
     responses::config_error_name,
 };
@@ -303,6 +303,16 @@ pub(super) fn handle_config_set(
             payload,
             false,
         ),
+        "desk/homing_obstruction_sensitivity" => apply_desk_update(runtime_config_state, |desk| {
+            desk.set_homing_obstruction_sensitivity(parse_homing_obstruction_sensitivity(payload)?)
+                .map_err(config_error_name)
+        }),
+        "desk/homing_obstruction_min_percent" => {
+            update_homing_obstruction_profile(runtime_config_state, payload, true)
+        }
+        "desk/homing_obstruction_windows" => {
+            update_homing_obstruction_profile(runtime_config_state, payload, false)
+        }
         "desk/override_unlock_timeout_ms" => apply_desk_update(runtime_config_state, |desk| {
             desk.set_override_unlock_timeout(parse_duration_ms(payload)?)
                 .map_err(config_error_name)
@@ -405,6 +415,27 @@ fn update_obstruction_profile(
                 .map_err(config_error_name),
             ObstructionSensitivity::None => Err(config_error_name(ConfigError::InvalidDeskConfig)),
         }
+    })
+}
+
+fn update_homing_obstruction_profile(
+    runtime_config_state: &RuntimeConfigState,
+    payload: &str,
+    update_percent: bool,
+) -> Result<(), &'static str> {
+    apply_desk_update(runtime_config_state, |desk| {
+        let current = desk.homing_obstruction_config();
+        let profile = if update_percent {
+            ObstructionProfileConfig::new(parse_percent(payload)?, current.consecutive_windows())
+        } else {
+            ObstructionProfileConfig::new(
+                current.minimum_baseline_percent(),
+                parse_windows(payload)?,
+            )
+        };
+
+        desk.set_homing_obstruction_profile(profile)
+            .map_err(config_error_name)
     })
 }
 
