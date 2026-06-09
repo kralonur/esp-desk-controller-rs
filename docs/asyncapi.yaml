@@ -1,0 +1,734 @@
+asyncapi: 3.1.0
+info:
+  title: ESP PWM Motor Standing Desk Controller MQTT API
+  version: 0.1.0
+  description: >-
+    MQTT command, status, response, and runtime configuration API for the ESP
+    PWM motor standing desk controller.
+defaultContentType: text/plain
+servers:
+  broker:
+    host: '{brokerHost}:{brokerPort}'
+    protocol: mqtt
+    variables:
+      brokerHost:
+        default: 192.168.1.10
+        description: MQTT_BROKER_ADDR
+      brokerPort:
+        default: '1883'
+        description: MQTT_BROKER_PORT
+channels:
+  '{prefix}/cmd/home':
+    address: '{prefix}/cmd/home'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/cmd/force_home':
+    address: '{prefix}/cmd/force_home'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/cmd/stop':
+    address: '{prefix}/cmd/stop'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/cmd/up':
+    address: '{prefix}/cmd/up'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/cmd/down':
+    address: '{prefix}/cmd/down'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/cmd/move_to':
+    address: '{prefix}/cmd/move_to'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/cmd/move_by':
+    address: '{prefix}/cmd/move_by'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/cmd/override/unlock':
+    address: '{prefix}/cmd/override/unlock'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/cmd/override/lock':
+    address: '{prefix}/cmd/override/lock'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/cmd/override/leg/{leg}/home':
+    address: '{prefix}/cmd/override/leg/{leg}/home'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+      leg:
+        $ref: '#/components/parameters/leg'
+  '{prefix}/cmd/override/leg/{leg}/{direction}':
+    address: '{prefix}/cmd/override/leg/{leg}/{direction}'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+      leg:
+        $ref: '#/components/parameters/leg'
+      direction:
+        $ref: '#/components/parameters/overrideDirection'
+  '{prefix}/config/get':
+    address: '{prefix}/config/get'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/config/reset':
+    address: '{prefix}/config/reset'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/config/set/{fieldPath}':
+    address: '{prefix}/config/set/{fieldPath}'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+      fieldPath:
+        $ref: '#/components/parameters/configFieldPath'
+  '{prefix}/status':
+    address: '{prefix}/status'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/response':
+    address: '{prefix}/response'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+  '{prefix}/config':
+    address: '{prefix}/config'
+    parameters:
+      prefix:
+        $ref: '#/components/parameters/topicPrefix'
+operations:
+  '{prefix}/cmd/home.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1cmd~1home'
+    summary: Home the full desk.
+    x-response-command: home
+    messages:
+      - $ref: '#/components/messages/EmptyCommand'
+  '{prefix}/cmd/force_home.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1cmd~1force_home'
+    summary: Trust the current physical desk position as home without moving.
+    x-accepted-when: Controller is idle and override mode is locked.
+    x-response-command: force_home
+    messages:
+      - $ref: '#/components/messages/EmptyCommand'
+  '{prefix}/cmd/stop.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1cmd~1stop'
+    summary: Stop active or pending desk motion.
+    x-response-command: stop
+    messages:
+      - $ref: '#/components/messages/EmptyCommand'
+  '{prefix}/cmd/up.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1cmd~1up'
+    summary: Move upward by encoder counts.
+    x-payload-semantics: >-
+      Absolute value is used as upward relative movement counts. i32::MIN is
+      rejected.
+    x-response-command: up
+    messages:
+      - $ref: '#/components/messages/SignedCountCommand'
+  '{prefix}/cmd/down.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1cmd~1down'
+    summary: Move downward by encoder counts.
+    x-payload-semantics: >-
+      Absolute value is used as downward relative movement counts. i32::MIN is
+      rejected.
+    x-response-command: down
+    messages:
+      - $ref: '#/components/messages/SignedCountCommand'
+  '{prefix}/cmd/move_to.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1cmd~1move_to'
+    summary: Move to an absolute encoder-count position.
+    x-response-command: move_to
+    messages:
+      - $ref: '#/components/messages/PositionCommand'
+  '{prefix}/cmd/move_by.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1cmd~1move_by'
+    summary: Move by a signed encoder-count delta.
+    x-response-command: move_by
+    messages:
+      - $ref: '#/components/messages/RelativeCountCommand'
+  '{prefix}/cmd/override/unlock.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1cmd~1override~1unlock'
+    summary: Unlock manual override commands for the configured timeout.
+    x-response-command: override_unlock
+    messages:
+      - $ref: '#/components/messages/OverrideUnlockCommand'
+  '{prefix}/cmd/override/lock.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1cmd~1override~1lock'
+    summary: Lock manual override mode.
+    x-response-command: override_lock
+    messages:
+      - $ref: '#/components/messages/EmptyCommand'
+  '{prefix}/cmd/override/leg/{leg}/home.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1cmd~1override~1leg~1{leg}~1home'
+    summary: Home one leg in manual override mode.
+    x-response-command: override_leg_home
+    messages:
+      - $ref: '#/components/messages/EmptyCommand'
+  '{prefix}/cmd/override/leg/{leg}/{direction}.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1cmd~1override~1leg~1{leg}~1{direction}'
+    summary: Move one leg by encoder counts in manual override mode.
+    x-response-command: override_leg_move
+    messages:
+      - $ref: '#/components/messages/OverrideStepsCommand'
+  '{prefix}/config/get.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1config~1get'
+    summary: Request a full runtime config snapshot.
+    x-response-command: config_get
+    x-also-publishes:
+      - config
+    messages:
+      - $ref: '#/components/messages/EmptyCommand'
+  '{prefix}/config/reset.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1config~1reset'
+    summary: Reset runtime config to firmware defaults.
+    x-accepted-when: Controller is idle and mode is unhomed or faulted.
+    x-response-command: config_reset
+    x-also-publishes:
+      - status
+      - config
+    messages:
+      - $ref: '#/components/messages/EmptyCommand'
+  '{prefix}/config/set/{fieldPath}.subscribe':
+    action: send
+    channel:
+      $ref: '#/channels/{prefix}~1config~1set~1{fieldPath}'
+    summary: Update one runtime config field.
+    x-response-command: config_set
+    x-response-fields:
+      - command
+      - field
+      - result
+      - persist
+      - applies_on_next_command
+    x-also-publishes:
+      - status
+      - config
+    messages:
+      - $ref: '#/components/messages/ConfigSetCommand'
+  '{prefix}/status.publish':
+    action: receive
+    channel:
+      $ref: '#/channels/{prefix}~1status'
+    summary: Current controller and desk status.
+    messages:
+      - $ref: '#/components/messages/Status'
+  '{prefix}/response.publish':
+    action: receive
+    channel:
+      $ref: '#/channels/{prefix}~1response'
+    summary: Command and config command responses.
+    messages:
+      - $ref: '#/components/messages/Response'
+  '{prefix}/config.publish':
+    action: receive
+    channel:
+      $ref: '#/channels/{prefix}~1config'
+    summary: Full runtime config snapshot.
+    messages:
+      - $ref: '#/components/messages/ConfigSnapshot'
+components:
+  parameters:
+    topicPrefix:
+      default: desk
+      description: MQTT_TOPIC_PREFIX. Default example is desk.
+    leg:
+      enum:
+        - left
+        - right
+    overrideDirection:
+      enum:
+        - up
+        - down
+    configFieldPath:
+      description: Slash-separated config field path. See x-config-fields.
+  messages:
+    EmptyCommand:
+      contentType: text/plain
+      payload:
+        type: string
+        description: Payload is ignored. Empty payload is recommended.
+    SignedCountCommand:
+      contentType: text/plain
+      payload:
+        $ref: '#/components/schemas/I32Text'
+    PositionCommand:
+      contentType: text/plain
+      payload:
+        $ref: '#/components/schemas/I32Text'
+    RelativeCountCommand:
+      contentType: text/plain
+      payload:
+        $ref: '#/components/schemas/I32Text'
+    OverrideStepsCommand:
+      contentType: text/plain
+      payload:
+        $ref: '#/components/schemas/OverrideStepsText'
+    OverrideUnlockCommand:
+      contentType: text/plain
+      payload:
+        type: string
+        const: UNLOCK
+    ConfigSetCommand:
+      contentType: text/plain
+      payload:
+        type: string
+        description: Field-specific text payload. See x-config-fields.
+      x-persistence: >-
+        Saved immediately when idle. Deferred while a command is active.
+        Disabled when flash persistence is unavailable.
+      x-validation: >-
+        Fields are parsed first, then full runtime config is validated. Some
+        constraints depend on other fields; rejected updates leave the previous
+        config active.
+    Status:
+      contentType: text/plain
+      payload:
+        $ref: '#/components/schemas/KeyValueText'
+      x-key-value-fields:
+        - key: mode
+          schema: ControllerMode
+        - key: command_pending
+          schema: BooleanText
+        - key: stop_requested
+          schema: BooleanText
+        - key: last_fault
+          schema: Fault
+        - key: homed
+          schema: BooleanText
+        - key: needs_rehome
+          schema: BooleanText
+        - key: motion
+          schema: MotionState
+        - key: last_stop_reason
+          schema: StopReason
+        - key: obstruction_sensitivity
+          schema: ObstructionSensitivity
+        - key: homing_obstruction_sensitivity
+          schema: HomingObstructionSensitivity
+        - key: target_active
+          schema: BooleanText
+        - key: target_position
+          schema: I32Text
+        - key: average_position
+          schema: I32Text
+        - key: left_position
+          schema: I32Text
+        - key: right_position
+          schema: I32Text
+        - key: left_duty
+          schema: DutyPercentText
+        - key: right_duty
+          schema: DutyPercentText
+        - key: min_position
+          schema: I32Text
+        - key: max_position
+          schema: I32Text
+        - key: skew_counts
+          schema: I32Text
+    Response:
+      contentType: text/plain
+      payload:
+        $ref: '#/components/schemas/KeyValueText'
+      x-common-fields:
+        - key: command
+          schema: string
+        - key: result
+          schema: string
+    ConfigSnapshot:
+      contentType: text/plain
+      payload:
+        $ref: '#/components/schemas/KeyValueText'
+      x-fields-source: x-config-fields[].snapshot_key
+  schemas:
+    KeyValueText:
+      type: string
+      description: Newline-separated key=value fields.
+    I32Text:
+      type: string
+      pattern: ^-?[0-9]+$
+      x-minimum: -2147483648
+      x-maximum: 2147483647
+    U32I32MaxText:
+      type: string
+      pattern: ^[0-9]+$
+      x-minimum: 0
+      x-maximum: 2147483647
+    OverrideStepsText:
+      type: string
+      pattern: ^[1-9][0-9]*$
+      x-minimum: 1
+      x-maximum: 2147483647
+    DutyPercentText:
+      type: string
+      pattern: ^[0-9]+$
+      x-minimum: 0
+      x-maximum: 100
+    DutyTrimPercentText:
+      type: string
+      pattern: ^-?[0-9]+$
+      x-minimum: -128
+      x-maximum: 127
+    U64Text:
+      type: string
+      pattern: ^[0-9]+$
+      x-minimum: 0
+      x-maximum: 18446744073709552000
+    PercentText:
+      type: string
+      pattern: ^[0-9]+$
+      x-minimum: 0
+      x-maximum: 100
+    WindowsText:
+      type: string
+      pattern: ^[1-9][0-9]*$
+      x-minimum: 1
+      x-maximum: 255
+    BooleanText:
+      type: string
+      enum:
+        - 'true'
+        - 'false'
+    DriveSide:
+      type: string
+      enum:
+        - left
+        - right
+    QuadratureDirection:
+      type: string
+      enum:
+        - positive
+        - negative
+    ObstructionSensitivity:
+      type: string
+      enum:
+        - none
+        - low
+        - medium
+        - high
+    HomingObstructionSensitivity:
+      type: string
+      enum:
+        - off
+        - on
+    ControllerMode:
+      type: string
+      enum:
+        - unhomed
+        - ready
+        - homing
+        - moving
+        - override
+        - faulted
+    MotionState:
+      type: string
+      enum:
+        - idle
+        - homing
+        - moving_up
+        - moving_down
+    StopReason:
+      type: string
+      enum:
+        - none
+        - target_reached
+        - user_stop
+        - obstruction
+    Fault:
+      type: string
+      enum:
+        - none
+        - left_leg_homing_start_timeout
+        - left_leg_polarity_mismatch
+        - left_leg_move_timeout
+        - right_leg_homing_start_timeout
+        - right_leg_polarity_mismatch
+        - right_leg_move_timeout
+        - move_timeout
+        - skew_fault
+        - invariant_direction_mismatch
+        - invariant_wrong_way_progress
+        - rehome_required
+x-result-values:
+  command:
+    - accepted
+    - ignored_idle
+    - invalid_payload
+    - rejected_busy
+    - rejected_unhomed
+    - rejected_faulted
+    - rejected_locked
+    - rejected_override_unlocked
+  config:
+    - published
+    - updated
+    - unknown_field
+    - invalid_payload
+    - invalid_config
+    - rejected_not_idle_unhomed
+    - persist_failed
+  persist:
+    - disabled
+    - saved
+    - deferred
+    - erased
+    - failed
+    - unchanged
+x-config-fields:
+  - field_path: hardware/left/up_drive
+    snapshot_key: hardware.left_up_drive
+    payload_schema: DriveSide
+    default: left
+    accepted_when: Controller is idle and mode is unhomed or faulted.
+  - field_path: hardware/left/up_direction
+    snapshot_key: hardware.left_up_direction
+    payload_schema: QuadratureDirection
+    default: positive
+    accepted_when: Controller is idle and mode is unhomed or faulted.
+  - field_path: hardware/right/up_drive
+    snapshot_key: hardware.right_up_drive
+    payload_schema: DriveSide
+    default: left
+    accepted_when: Controller is idle and mode is unhomed or faulted.
+  - field_path: hardware/right/up_direction
+    snapshot_key: hardware.right_up_direction
+    payload_schema: QuadratureDirection
+    default: positive
+    accepted_when: Controller is idle and mode is unhomed or faulted.
+  - field_path: desk/target_tolerance
+    snapshot_key: desk.target_tolerance
+    payload_schema: U32I32MaxText
+    default: 5
+  - field_path: desk/target_slow_zone
+    snapshot_key: desk.target_slow_zone
+    payload_schema: U32I32MaxText
+    default: 10
+  - field_path: desk/move_timeout_ms
+    snapshot_key: desk.move_timeout_ms
+    payload_schema: U64Text
+    default: 1200
+  - field_path: desk/obstruction_sample_window_ms
+    snapshot_key: desk.obstruction_sample_window_ms
+    payload_schema: U64Text
+    default: 150
+    note: Used for coordinated-move obstruction detection and homing lower-stop contact detection.
+  - field_path: desk/obstruction_warmup_duration_ms
+    snapshot_key: desk.obstruction_warmup_duration_ms
+    payload_schema: U64Text
+    default: 300
+    note: Used for coordinated-move obstruction detection and homing lower-stop contact detection.
+  - field_path: desk/obstruction_warmup_counts
+    snapshot_key: desk.obstruction_warmup_counts
+    payload_schema: U32I32MaxText
+    default: 8
+    note: Used for coordinated-move obstruction detection and homing lower-stop contact detection.
+  - field_path: desk/min_move_duty
+    snapshot_key: desk.min_move_duty
+    payload_schema: DutyPercentText
+    default: 15
+  - field_path: desk/move_run_duty
+    snapshot_key: desk.move_run_duty
+    payload_schema: DutyPercentText
+    default: 30
+  - field_path: desk/move_slow_duty
+    snapshot_key: desk.move_slow_duty
+    payload_schema: DutyPercentText
+    default: 17
+  - field_path: desk/move_sync_duty_step
+    snapshot_key: desk.move_sync_duty_step
+    payload_schema: DutyTrimPercentText
+    default: 8
+  - field_path: desk/homing_poll_interval_ms
+    snapshot_key: desk.homing_poll_interval_ms
+    payload_schema: U64Text
+    default: 20
+  - field_path: desk/homing_start_timeout_ms
+    snapshot_key: desk.homing_start_timeout_ms
+    payload_schema: U64Text
+    default: 800
+  - field_path: desk/homing_stall_timeout_ms
+    snapshot_key: desk.homing_stall_timeout_ms
+    payload_schema: U64Text
+    default: 600
+  - field_path: desk/homing_backoff_steps
+    snapshot_key: desk.homing_backoff_steps
+    payload_schema: U32I32MaxText
+    default: 20
+  - field_path: desk/homing_run_duty
+    snapshot_key: desk.homing_run_duty
+    payload_schema: DutyPercentText
+    default: 20
+  - field_path: desk/homing_sync_duty_step
+    snapshot_key: desk.homing_sync_duty_step
+    payload_schema: DutyTrimPercentText
+    default: 4
+  - field_path: desk/sync_speedup_enter_counts
+    snapshot_key: desk.sync_speedup_enter_counts
+    payload_schema: U32I32MaxText
+    default: 10
+  - field_path: desk/sync_speedup_exit_counts
+    snapshot_key: desk.sync_speedup_exit_counts
+    payload_schema: U32I32MaxText
+    default: 4
+  - field_path: desk/catch_up_enter_counts
+    snapshot_key: desk.catch_up_enter_counts
+    payload_schema: U32I32MaxText
+    default: 30
+  - field_path: desk/catch_up_exit_counts
+    snapshot_key: desk.catch_up_exit_counts
+    payload_schema: U32I32MaxText
+    default: 12
+  - field_path: desk/fault_skew_counts
+    snapshot_key: desk.fault_skew_counts
+    payload_schema: U32I32MaxText
+    default: 80
+  - field_path: desk/homing_fault_skew_counts
+    snapshot_key: desk.homing_fault_skew_counts
+    payload_schema: U32I32MaxText
+    default: 160
+  - field_path: desk/obstruction_sensitivity
+    snapshot_key: desk.obstruction_sensitivity
+    payload_schema: ObstructionSensitivity
+    default: high
+    note: Set to none to disable coordinated-move obstruction detection.
+  - field_path: desk/low_obstruction_min_percent
+    snapshot_key: desk.low_obstruction_min_percent
+    payload_schema: PercentText
+    default: 55
+  - field_path: desk/low_obstruction_windows
+    snapshot_key: desk.low_obstruction_windows
+    payload_schema: WindowsText
+    default: 3
+  - field_path: desk/medium_obstruction_min_percent
+    snapshot_key: desk.medium_obstruction_min_percent
+    payload_schema: PercentText
+    default: 70
+  - field_path: desk/medium_obstruction_windows
+    snapshot_key: desk.medium_obstruction_windows
+    payload_schema: WindowsText
+    default: 2
+  - field_path: desk/high_obstruction_min_percent
+    snapshot_key: desk.high_obstruction_min_percent
+    payload_schema: PercentText
+    default: 80
+  - field_path: desk/high_obstruction_windows
+    snapshot_key: desk.high_obstruction_windows
+    payload_schema: WindowsText
+    default: 2
+  - field_path: desk/homing_obstruction_sensitivity
+    snapshot_key: desk.homing_obstruction_sensitivity
+    payload_schema: HomingObstructionSensitivity
+    default: on
+    note: Set to off to disable homing lower-stop contact detection and use stall timeout only.
+  - field_path: desk/homing_obstruction_min_percent
+    snapshot_key: desk.homing_obstruction_min_percent
+    payload_schema: PercentText
+    default: 80
+  - field_path: desk/homing_obstruction_windows
+    snapshot_key: desk.homing_obstruction_windows
+    payload_schema: WindowsText
+    default: 2
+  - field_path: desk/override_unlock_timeout_ms
+    snapshot_key: desk.override_unlock_timeout_ms
+    payload_schema: U64Text
+    default: 120000
+  - field_path: desk/mqtt_status_publish_interval_ms
+    snapshot_key: desk.mqtt_status_publish_interval_ms
+    payload_schema: U64Text
+    default: 100
+  - field_path: leg/startup_duty
+    snapshot_key: leg.startup_duty
+    payload_schema: DutyPercentText
+    default: 100
+  - field_path: leg/max_duty
+    snapshot_key: leg.max_duty
+    payload_schema: DutyPercentText
+    default: 100
+  - field_path: leg/run_duty
+    snapshot_key: leg.run_duty
+    payload_schema: DutyPercentText
+    default: 30
+  - field_path: leg/slow_duty
+    snapshot_key: leg.slow_duty
+    payload_schema: DutyPercentText
+    default: 15
+  - field_path: leg/homing_duty
+    snapshot_key: leg.homing_duty
+    payload_schema: DutyPercentText
+    default: 20
+  - field_path: leg/startup_events
+    snapshot_key: leg.startup_events
+    payload_schema: U32I32MaxText
+    default: 8
+  - field_path: leg/homing_start_timeout_ms
+    snapshot_key: leg.homing_start_timeout_ms
+    payload_schema: U64Text
+    default: 800
+  - field_path: leg/homing_stall_timeout_ms
+    snapshot_key: leg.homing_stall_timeout_ms
+    payload_schema: U64Text
+    default: 600
+  - field_path: leg/homing_poll_interval_ms
+    snapshot_key: leg.homing_poll_interval_ms
+    payload_schema: U64Text
+    default: 20
+  - field_path: leg/homing_backoff_steps
+    snapshot_key: leg.homing_backoff_steps
+    payload_schema: U32I32MaxText
+    default: 20
+  - field_path: leg/default_max_position
+    snapshot_key: leg.default_max_position
+    payload_schema: I32Text
+    default: 2000
+  - field_path: leg/move_stall_timeout_ms
+    snapshot_key: leg.move_stall_timeout_ms
+    payload_schema: U64Text
+    default: 600
+  - field_path: leg/target_slow_zone
+    snapshot_key: leg.target_slow_zone
+    payload_schema: U32I32MaxText
+    default: 10
+  - field_path: leg/target_tolerance
+    snapshot_key: leg.target_tolerance
+    payload_schema: U32I32MaxText
+    default: 5
