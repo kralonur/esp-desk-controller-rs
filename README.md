@@ -11,6 +11,12 @@ desk was for me. The goal of this project is to build a replacement controller
 without spending much money on electronics, using parts that are widely
 available.
 
+## Demo
+
+https://github.com/user-attachments/assets/1bbbc4fd-5dba-4966-a858-7fe3071df6df
+
+_Apologies for the heavily compressed video due to GitHub video limits the video is running at 2x speed. I wanted to demonstrate the homing and movement sequence while showing the desk legs' synchronization capabilities with a digital angle finder. (Also, the cable mess is only because the project is not finished yet. I swear I'm more organized normally :D)_
+
 ## Hardware
 
 This is the hardware I used. The desk does not have to be an IKEA UPPSPEL, but
