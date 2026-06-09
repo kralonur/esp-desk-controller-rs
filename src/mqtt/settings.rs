@@ -79,6 +79,8 @@ pub(super) struct MqttSettings {
     topic_config_set_all: String,
     // Subscribe topic for homing the full desk.
     topic_home: String,
+    // Subscribe topic for trusting the current position as home without movement.
+    topic_force_home: String,
     // Subscribe topic for stopping active desk motion.
     topic_stop: String,
     // Subscribe topic for moving the desk upward.
@@ -146,6 +148,7 @@ impl MqttSettings {
             topic_config_reset: format!("{topic_prefix}/config/reset"),
             topic_config_set_all: format!("{topic_prefix}/config/set/#"),
             topic_home: format!("{topic_prefix}/{}", CommandTopic::Home.suffix()),
+            topic_force_home: format!("{topic_prefix}/{}", CommandTopic::ForceHome.suffix()),
             topic_stop: format!("{topic_prefix}/{}", CommandTopic::Stop.suffix()),
             topic_up: format!("{topic_prefix}/{}", CommandTopic::Up.suffix()),
             topic_down: format!("{topic_prefix}/{}", CommandTopic::Down.suffix()),
@@ -201,6 +204,7 @@ impl MqttSettings {
     ) -> Result<TopicFilter<'_>, MqttError<'static>> {
         let topic = match command {
             CommandTopic::Home => &self.topic_home,
+            CommandTopic::ForceHome => &self.topic_force_home,
             CommandTopic::Stop => &self.topic_stop,
             CommandTopic::Up => &self.topic_up,
             CommandTopic::Down => &self.topic_down,
@@ -230,6 +234,7 @@ impl MqttSettings {
     pub(super) fn parse_incoming_topic<'a>(&'a self, topic: &'a str) -> Option<IncomingTopic<'a>> {
         let command = match topic {
             topic if topic == self.topic_home => Some(CommandTopic::Home),
+            topic if topic == self.topic_force_home => Some(CommandTopic::ForceHome),
             topic if topic == self.topic_stop => Some(CommandTopic::Stop),
             topic if topic == self.topic_up => Some(CommandTopic::Up),
             topic if topic == self.topic_down => Some(CommandTopic::Down),

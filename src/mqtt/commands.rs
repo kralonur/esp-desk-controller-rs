@@ -137,6 +137,11 @@ fn handle_motion_command(
         CommandTopic::Home => {
             submission_response(topic.response_name(), state.submit_home(), state.snapshot())
         }
+        CommandTopic::ForceHome => submission_response(
+            topic.response_name(),
+            state.submit_force_home(),
+            state.snapshot(),
+        ),
         CommandTopic::Stop => match state.submit_stop() {
             StopSubmission::Accepted => {
                 response_body(topic.response_name(), "accepted", state.snapshot())

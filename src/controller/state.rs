@@ -120,6 +120,31 @@ impl DeskControllerState {
         }
     }
 
+    /// Queue a no-motion home command that trusts the current physical position as zero.
+    pub fn submit_force_home(&self) -> CommandSubmission {
+        let snapshot = self.snapshot();
+        if snapshot.command_pending
+            || matches!(
+                snapshot.mode,
+                DeskControllerMode::Homing
+                    | DeskControllerMode::Moving
+                    | DeskControllerMode::Override
+            )
+        {
+            return CommandSubmission::RejectedBusy;
+        }
+
+        if self.override_unlocked() {
+            return CommandSubmission::RejectedOverrideUnlocked;
+        }
+
+        if self.try_queue(DeskCommand::ForceHome) {
+            CommandSubmission::Accepted
+        } else {
+            CommandSubmission::RejectedBusy
+        }
+    }
+
     /// Queue an absolute target move for a ready desk.
     pub fn submit_move_to(&self, position: PositionCounts) -> CommandSubmission {
         self.submit_motion(DeskCommand::MoveTo(position))

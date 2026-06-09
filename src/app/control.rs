@@ -100,6 +100,29 @@ pub(super) async fn run_desk_control<
                     }
                 };
             }
+            DeskCommand::ForceHome => {
+                if control_state.stop_requested() {
+                    control_state.clear_stop_request();
+                    info!("force_home command cancelled before start");
+                    continue;
+                }
+
+                info!("received /force_home command");
+                desk = match desk {
+                    DeskRuntime::Unhomed(desk) => {
+                        let desk = desk.force_home();
+                        info!("desk force-homed");
+                        control_state.finish_ready();
+                        DeskRuntime::Ready(desk)
+                    }
+                    DeskRuntime::Ready(desk) => {
+                        let desk = desk.force_home();
+                        info!("desk force-rehomed");
+                        control_state.finish_ready();
+                        DeskRuntime::Ready(desk)
+                    }
+                };
+            }
             DeskCommand::MoveTo(target_position) => {
                 if control_state.stop_requested() {
                     control_state.clear_stop_request();

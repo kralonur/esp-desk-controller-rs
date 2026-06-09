@@ -172,6 +172,60 @@ impl<
 impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm: PwmPeripheral>
     Desk<'a, UnhomedDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>
 {
+    /// Trust the current physical desk position as home without moving.
+    ///
+    /// This is a manual recovery operation: the caller is responsible for only
+    /// using it when both legs are visually at the lower reference position.
+    pub fn force_home(mut self) -> Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm> {
+        let runtime_config = self.runtime_config_reader.current();
+        let leg_config = runtime_config.leg();
+
+        let left_leg = self.left.take().expect("left leg missing");
+        let right_leg = self.right.take().expect("right leg missing");
+        let (left_leg, right_leg) = match (left_leg, right_leg) {
+            (ManagedLeg::Unhomed(left_leg), ManagedLeg::Unhomed(right_leg)) => {
+                (left_leg, right_leg)
+            }
+            _ => unreachable!("unhomed desk must contain unhomed legs"),
+        };
+
+        left_leg.reset_position();
+        right_leg.reset_position();
+        let left_leg = left_leg.into_ready_with_config(leg_config);
+        let right_leg = right_leg.into_ready_with_config(leg_config);
+        let left_status = left_leg.status();
+        let right_status = right_leg.status();
+        left_leg.publish_status();
+        right_leg.publish_status();
+
+        self.update_status(|status| {
+            status.homed = true;
+            status.needs_rehome = false;
+            status.motion = DeskMotionState::Idle;
+            status.last_stop_reason = DeskStopReason::None;
+            status.target_active = false;
+            status.target_position = 0;
+            status.left_position = left_status.position;
+            status.right_position = right_status.position;
+            status.left_min_position = left_status.min_position;
+            status.left_max_position = left_status.max_position;
+            status.right_min_position = right_status.min_position;
+            status.right_max_position = right_status.max_position;
+            status.min_position = left_status.min_position.max(right_status.min_position);
+            status.max_position = left_status.max_position.min(right_status.max_position);
+            status.average_position = average_position(left_status.position, right_status.position);
+            status.skew_counts = abs_position_delta(left_status.position, right_status.position);
+        });
+
+        Desk {
+            left: Some(ManagedLeg::Ready(left_leg)),
+            right: Some(ManagedLeg::Ready(right_leg)),
+            runtime_config_reader: self.runtime_config_reader,
+            status_state: self.status_state,
+            _state: ReadyDesk,
+        }
+    }
+
     pub(super) fn take_unhomed_legs(
         &mut self,
     ) -> (
@@ -315,6 +369,11 @@ fn reset_unhomed_leg_positions<
 impl<'a, const LEFT_OP: u8, LeftPwm: PwmPeripheral, const RIGHT_OP: u8, RightPwm: PwmPeripheral>
     Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm>
 {
+    /// Trust the current physical desk position as home without moving.
+    pub fn force_home(self) -> Desk<'a, ReadyDesk, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm> {
+        self.into_unhomed().force_home()
+    }
+
     pub(super) fn ready_legs_mut(
         &mut self,
     ) -> ReadyLegPair<'_, 'a, LEFT_OP, LeftPwm, RIGHT_OP, RightPwm> {

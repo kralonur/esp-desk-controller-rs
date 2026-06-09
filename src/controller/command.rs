@@ -7,6 +7,7 @@ use crate::units::{CountDelta, PositionCounts, RelativeCounts};
 /// Command consumed by the desk control loop.
 pub enum DeskCommand {
     Home,
+    ForceHome,
     MoveTo(PositionCounts),
     MoveBy(RelativeCounts),
     Override(OverrideCommand),
