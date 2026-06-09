@@ -1,4 +1,4 @@
-# ESP PWM Motor Standing Desk Controller
+# ESP Desk Controller RS
 
 ## Motivation
 

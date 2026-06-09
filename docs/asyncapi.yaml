@@ -1,10 +1,10 @@
 asyncapi: 3.1.0
 info:
-  title: ESP PWM Motor Standing Desk Controller MQTT API
+  title: ESP Desk Controller RS MQTT API
   version: 0.1.0
   description: >-
     MQTT command, status, response, and runtime configuration API for the ESP
-    PWM motor standing desk controller.
+    desk controller.
 defaultContentType: text/plain
 servers:
   broker:

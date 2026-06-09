@@ -793,6 +793,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp-desk-controller-rs"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "defmt 1.1.0",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-net",
+ "embassy-sync 0.8.0",
+ "embassy-time",
+ "esp-alloc",
+ "esp-backtrace",
+ "esp-bootloader-esp-idf",
+ "esp-hal",
+ "esp-nvs",
+ "esp-println",
+ "esp-radio",
+ "esp-rtos",
+ "esp-storage",
+ "rust-mqtt",
+ "static_cell",
+]
+
+[[package]]
 name = "esp-hal"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -936,30 +960,6 @@ dependencies = [
  "esp-sync 0.2.1",
  "log",
  "portable-atomic",
-]
-
-[[package]]
-name = "esp-pwm-motor"
-version = "0.1.0"
-dependencies = [
- "critical-section",
- "defmt 1.1.0",
- "embassy-executor",
- "embassy-futures",
- "embassy-net",
- "embassy-sync 0.8.0",
- "embassy-time",
- "esp-alloc",
- "esp-backtrace",
- "esp-bootloader-esp-idf",
- "esp-hal",
- "esp-nvs",
- "esp-println",
- "esp-radio",
- "esp-rtos",
- "esp-storage",
- "rust-mqtt",
- "static_cell",
 ]
 
 [[package]]

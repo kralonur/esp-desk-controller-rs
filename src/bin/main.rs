@@ -1,7 +1,7 @@
 //! Minimal firmware entrypoint.
 //!
 //! This binary owns the earliest boot setup: HAL configuration, peripheral
-//! acquisition, heap initialization, and delegation to `esp_pwm_motor::app`.
+//! acquisition, heap initialization, and delegation to `esp_desk_controller_rs::app`.
 
 #![no_std]
 #![no_main]
@@ -25,5 +25,5 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_alloc::heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 65536);
 
-    esp_pwm_motor::app::run(spawner, peripherals).await
+    esp_desk_controller_rs::app::run(spawner, peripherals).await
 }

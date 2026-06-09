@@ -1,11 +1,11 @@
 [package]
 edition = "2024"
-name = "esp-pwm-motor"
+name = "esp-desk-controller-rs"
 rust-version = "1.88"
 version = "0.1.0"
 
 [[bin]]
-name = "esp-pwm-motor"
+name = "esp-desk-controller-rs"
 path = "./src/bin/main.rs"
 
 [dependencies]
